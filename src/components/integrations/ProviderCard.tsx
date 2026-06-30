@@ -111,8 +111,9 @@ export function ProviderCard({
 
   const actionLabel = getProviderActionLabel(provider, orgIntegration);
   const showAgentDefaultControls = showAgentDefaultOnCard && requireAgentDefault;
+  const isAgentDefaultOnCard = showAgentDefaultOnCard && isDefaultAIProvider;
   const isDefault =
-    isOrganizationDefault || (isDefaultAIProvider && requireAgentDefault) || isPrimaryProvider;
+    isOrganizationDefault || isAgentDefaultOnCard || isPrimaryProvider;
   const isConnected = orgIntegration?.connection_status === 'connected';
   const showDefaultStar = (canSetDefault || showAgentDefaultControls) && isConnected;
 

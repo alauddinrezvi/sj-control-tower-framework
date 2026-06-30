@@ -68,9 +68,10 @@ export function useSetProviderAsDefault() {
 
       throw new Error('This category does not support a default provider.');
     },
-    onSuccess: () => {
+    onSuccess: (result) => {
       invalidateKeys.integrationSettings(queryClient);
       toast.success('Default provider updated.');
+      result?.warnings?.forEach((warning) => toast.warning(warning));
     },
     onError: (err: Error) => {
       toast.error('Failed to set default provider', { description: err.message });

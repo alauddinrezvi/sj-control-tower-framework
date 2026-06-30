@@ -23,6 +23,7 @@ export const AI_INTEGRATION_SLUGS = [
   'anthropic',
   'google-gemini',
   'perplexity',
+  'openrouter',
 ] as const;
 
 export const INTEGRATION_TO_AI_PROVIDER_SLUG: Record<string, string> = {
@@ -30,6 +31,7 @@ export const INTEGRATION_TO_AI_PROVIDER_SLUG: Record<string, string> = {
   anthropic: 'anthropic',
   'google-gemini': 'google',
   perplexity: 'perplexity',
+  openrouter: 'openrouter',
 };
 
 export const DEFAULT_AI_MODEL_POLICY: AIModelPolicy = {
@@ -98,7 +100,7 @@ export async function getAIModelPolicy(): Promise<AIModelPolicy> {
   return normalizeAIModelPolicy(row?.ai_model_policy);
 }
 
-export async function getConnectedAIProviderIds(): Promise<Set<string>> {
+export async function getConnectedAIIntegrationSlugs(): Promise<Set<string>> {
   const { data: orgIntegrations, error: orgError } = await supabase
     .from('organization_integrations')
     .select('connection_status, enabled, provider:integration_providers(slug)')
@@ -114,6 +116,12 @@ export async function getConnectedAIProviderIds(): Promise<Set<string>> {
       connectedIntegrationSlugs.add(slug);
     }
   }
+  return connectedIntegrationSlugs;
+}
+
+export async function getConnectedAIProviderIds(): Promise<Set<string>> {
+  const connectedIntegrationSlugs = await getConnectedAIIntegrationSlugs();
+  if (connectedIntegrationSlugs.size === 0) return new Set();
 
   const aiSlugs = [...connectedIntegrationSlugs].map(integrationSlugToAIProviderSlug);
   if (aiSlugs.length === 0) return new Set();
@@ -175,7 +183,8 @@ export async function setGlobalDefaultChatModel(modelId: string): Promise<void> 
 
 export function sanitizeAIModelPolicy(
   input: AIModelPolicy,
-  selectableModels: SelectableChatModel[]
+  selectableModels: SelectableChatModel[],
+  connectedIntegrationSlugs: Iterable<string> = []
 ): { policy: AIModelPolicy; warnings: string[] } {
   const warnings: string[] = [];
   const selectableIds = new Set(selectableModels.map((m) => m.id));
@@ -183,12 +192,30 @@ export function sanitizeAIModelPolicy(
   let default_chat_model_id = input.default_chat_model_id;
   if (default_chat_model_id && !selectableIds.has(default_chat_model_id)) {
     warnings.push('Selected default model is not available from a connected provider.');
+    const providerScopedModels = input.default_provider_slug
+      ? selectableModels.filter(
+          (m) =>
+            integrationSlugFromAIProviderSlug(m.provider_slug) === input.default_provider_slug
+        )
+      : selectableModels;
     const fallback =
-      selectableModels.find((m) => m.is_default) ?? selectableModels[0] ?? null;
+      providerScopedModels.find((m) => m.is_default) ?? providerScopedModels[0] ?? null;
     default_chat_model_id = fallback?.id ?? null;
   }
 
-  if (!default_chat_model_id && selectableModels.length > 0) {
+  if (!default_chat_model_id && input.default_provider_slug) {
+    const providerModels = selectableModels.filter(
+      (m) =>
+        integrationSlugFromAIProviderSlug(m.provider_slug) === input.default_provider_slug
+    );
+    default_chat_model_id =
+      providerModels.find((m) => m.is_default)?.id ?? providerModels[0]?.id ?? null;
+    if (!default_chat_model_id) {
+      warnings.push(
+        `No chat models are enabled for ${input.default_provider_slug.replace(/-/g, ' ')} yet. Sync or add models in AI Models admin.`
+      );
+    }
+  } else if (!default_chat_model_id && selectableModels.length > 0 && !input.default_provider_slug) {
     const fallback =
       selectableModels.find((m) => m.is_default) ?? selectableModels[0];
     default_chat_model_id = fallback.id;
@@ -199,9 +226,13 @@ export function sanitizeAIModelPolicy(
   const user_visible_models =
     input.user_visible_models === 'default_only' ? 'default_only' : 'all_enabled';
 
-  const connectedSlugs = new Set(
-    selectableModels.map((m) => integrationSlugFromAIProviderSlug(m.provider_slug))
-  );
+  const connectedSlugs = new Set<string>();
+  for (const slug of connectedIntegrationSlugs) {
+    connectedSlugs.add(slug);
+  }
+  for (const model of selectableModels) {
+    connectedSlugs.add(integrationSlugFromAIProviderSlug(model.provider_slug));
+  }
   let default_provider_slug = input.default_provider_slug;
   if (
     default_provider_slug &&
@@ -301,7 +332,12 @@ export async function saveAIModelPolicy(
   if (!user) throw new Error('Not authenticated');
 
   const selectableModels = await fetchSelectableChatModels();
-  const { policy, warnings } = sanitizeAIModelPolicy(input, selectableModels);
+  const connectedIntegrationSlugs = await getConnectedAIIntegrationSlugs();
+  const { policy, warnings } = sanitizeAIModelPolicy(
+    input,
+    selectableModels,
+    connectedIntegrationSlugs
+  );
 
   const { data: existing, error: fetchError } = await supabase
     .from('integration_settings')
@@ -349,10 +385,20 @@ export async function setDefaultAIProvider(
   defaultChatModelId: string | null
 ): Promise<{ policy: AIModelPolicy; warnings: string[] }> {
   const current = await getAIModelPolicy();
+  const selectableModels = await fetchSelectableChatModels();
+  const providerModels = selectableModels.filter(
+    (m) => integrationSlugFromAIProviderSlug(m.provider_slug) === integrationSlug
+  );
+  const resolvedModelId =
+    defaultChatModelId ??
+    providerModels.find((m) => m.is_default)?.id ??
+    providerModels[0]?.id ??
+    null;
+
   return saveAIModelPolicy({
     ...current,
     default_provider_slug: integrationSlug,
-    default_chat_model_id: defaultChatModelId ?? current.default_chat_model_id,
+    default_chat_model_id: resolvedModelId,
   });
 }
 

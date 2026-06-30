@@ -19,6 +19,7 @@ export const AI_INTEGRATION_SLUGS = [
   'anthropic',
   'google-gemini',
   'perplexity',
+  'openrouter',
 ] as const
 
 export const INTEGRATION_TO_AI_PROVIDER_SLUG: Record<string, string> = {
@@ -26,6 +27,7 @@ export const INTEGRATION_TO_AI_PROVIDER_SLUG: Record<string, string> = {
   anthropic: 'anthropic',
   'google-gemini': 'google',
   perplexity: 'perplexity',
+  openrouter: 'openrouter',
 }
 
 const DEFAULT_AI_MODEL_POLICY: AIModelPolicy = {

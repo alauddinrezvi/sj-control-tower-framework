@@ -44,6 +44,7 @@ import {
   generateOAuthState,
   storeOAuthState,
   buildOAuthAuthorizationUrl,
+  formatRelativeTime,
 } from '@/lib/integration-utils';
 
 export default function ProviderDetail() {
@@ -185,22 +186,30 @@ export default function ProviderDetail() {
     }
   };
 
-  // Handle test connection
+  // Handle test connection — validate first; persist only when credentials are valid
   const handleTestConnection = async () => {
     if (!provider || !slug) return;
 
-    // Save first if there are changes
-    if (hasChanges) {
-      await handleSave();
+    if (!areRequiredFieldsFilled(normalizedFields, formValues, configuredSensitiveFields)) {
+      toast.error('Please fill in all required fields');
+      return;
     }
 
     try {
       const result = await testConnection.mutateAsync({
         providerSlug: slug,
+        providerId: provider.id,
         credentials: formValues,
       });
 
       if (result.valid) {
+        const saveResult = await updateIntegration.mutateAsync({
+          providerId: provider.id,
+          config: formValues,
+          enabled: true,
+        });
+        setConfiguredSensitiveFields(saveResult.configured_sensitive_fields);
+        setHasChanges(false);
         toast.success(result.message || 'Successfully connected to ' + provider.name);
       } else {
         toast.error(result.message || 'Failed to connect to ' + provider.name);
@@ -361,6 +370,14 @@ export default function ProviderDetail() {
                 >
                   View Docs
                 </a>
+              </div>
+            )}
+            {orgIntegration && (
+              <div className="space-y-1">
+                <p className="text-sm font-medium">Last Updated</p>
+                <p className="text-sm text-muted-foreground">
+                  {formatRelativeTime(orgIntegration.updated_at ?? orgIntegration.last_tested_at)}
+                </p>
               </div>
             )}
           </div>

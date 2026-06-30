@@ -8,6 +8,7 @@ import {
   Sparkles,
   Cloud,
   Zap,
+  Layers,
   Video,
   Mic2,
   Mail,
@@ -167,6 +168,7 @@ export function getProviderIcon(slug: string): LucideIcon {
     anthropic: Sparkles,
     'google-gemini': Cloud,
     perplexity: Zap,
+    openrouter: Layers,
 
     // Meeting Providers
     zoom: Video,

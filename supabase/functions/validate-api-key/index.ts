@@ -1,9 +1,209 @@
-// validate-api-key — supports: openai, sendgrid, zoom, anthropic, google_ai, perplexity, salesforce, hubspot, mailgun, postmark, amazon_ses, jira, asana, monday, clickup, workamajig, float, fellow, confluence, sharepoint, outlook, zoho-crm
+// validate-api-key — supports: openai, sendgrid, zoom, anthropic, google_ai, perplexity, openrouter, salesforce, hubspot, mailgun, postmark, amazon_ses, jira, asana, monday, clickup, workamajig, float, fellow, confluence, sharepoint, outlook, zoho-crm
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
+import { createClient, type SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2"
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
+}
+
+const CONFIGURED_PLACEHOLDER = '__CONFIGURED__'
+const ENCRYPTED_VALUE_PREFIX = 'v1:'
+
+const SENSITIVE_KEY_PATTERNS = [
+  /api[_-]?key$/i,
+  /client[_-]?secret$/i,
+  /[_-]secret$/i,
+  /[_-]token$/i,
+  /password$/i,
+  /private[_-]?key$/i,
+]
+
+class IntegrationConfigDecryption {
+  private static readonly VERSION = 'v1'
+  private static readonly ALGORITHM = 'AES-GCM'
+  private static readonly IV_LENGTH = 12
+  private static readonly TAG_LENGTH = 16
+
+  static async decrypt(ciphertext: string, keyString: string): Promise<string> {
+    const parts = ciphertext.split(':')
+    if (parts.length !== 3) throw new Error('Invalid ciphertext format')
+    const [version, ivBase64, encryptedBase64] = parts
+    if (version !== this.VERSION) throw new Error(`Unsupported version: ${version}`)
+    const iv = this.base64ToArrayBuffer(ivBase64)
+    const encrypted = this.base64ToArrayBuffer(encryptedBase64)
+    const key = await this.deriveKey(keyString)
+    const decrypted = await crypto.subtle.decrypt(
+      { name: this.ALGORITHM, iv, tagLength: this.TAG_LENGTH * 8 } as AesGcmParams,
+      key,
+      encrypted as BufferSource,
+    )
+    return new TextDecoder().decode(decrypted)
+  }
+
+  private static async deriveKey(keyString: string): Promise<CryptoKey> {
+    const encoder = new TextEncoder()
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(keyString),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits', 'deriveKey'],
+    )
+    return await crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: encoder.encode('sj-integration-config-salt'),
+        iterations: 100000,
+        hash: 'SHA-256',
+      },
+      baseKey,
+      { name: this.ALGORITHM, length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    )
+  }
+
+  private static base64ToArrayBuffer(base64: string): Uint8Array {
+    const binary = atob(base64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+}
+
+function getIntegrationEncryptionKey(): string {
+  const key = Deno.env.get('ENCRYPTION_KEY')?.trim()
+  if (key && key.length >= 16) return key
+  const fallback = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')?.trim()
+  if (fallback) return fallback
+  throw new Error('ENCRYPTION_KEY is not configured')
+}
+
+function isEncryptedConfigValue(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith(ENCRYPTED_VALUE_PREFIX)
+}
+
+function isSensitiveIntegrationFieldKey(fieldKey: string): boolean {
+  return SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(fieldKey))
+}
+
+function isMaskedCredential(value: string): boolean {
+  const trimmed = value.trim()
+  return !trimmed || trimmed === CONFIGURED_PLACEHOLDER || trimmed.startsWith('•')
+}
+
+async function decryptConfigValueIfNeeded(value: string): Promise<string> {
+  if (!value || !isEncryptedConfigValue(value)) return value
+  return await IntegrationConfigDecryption.decrypt(value, getIntegrationEncryptionKey())
+}
+
+async function decryptStoredIntegrationConfig(
+  config: Record<string, unknown>,
+  sensitiveKeys: Set<string>,
+): Promise<Record<string, unknown>> {
+  const result: Record<string, unknown> = { ...config }
+  for (const fieldKey of sensitiveKeys) {
+    const rawValue = config[fieldKey]
+    if (typeof rawValue !== 'string') continue
+    result[fieldKey] = await decryptConfigValueIfNeeded(rawValue)
+  }
+  for (const fieldKey of Object.keys(config)) {
+    if (sensitiveKeys.has(fieldKey)) continue
+    const rawValue = config[fieldKey]
+    if (typeof rawValue === 'string' && isEncryptedConfigValue(rawValue)) {
+      result[fieldKey] = await decryptConfigValueIfNeeded(rawValue)
+    }
+  }
+  return result
+}
+
+async function getSensitiveFieldKeysForProvider(
+  supabase: SupabaseClient,
+  providerId: string,
+): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from('integration_fields')
+    .select('field_key, is_sensitive')
+    .eq('provider_id', providerId)
+  if (error) throw error
+  const keys = new Set<string>()
+  for (const row of data ?? []) {
+    const fieldKey = row.field_key as string
+    if (row.is_sensitive === true || isSensitiveIntegrationFieldKey(fieldKey)) {
+      keys.add(fieldKey)
+    }
+  }
+  return keys
+}
+
+async function mergeIntegrationHubCredentials(
+  authHeader: string,
+  providerId: string,
+  incoming: Record<string, string>,
+): Promise<Record<string, string>> {
+  const needsStored = Object.values(incoming).some(
+    (value) => typeof value === 'string' && isMaskedCredential(value),
+  )
+  if (!needsStored) return incoming
+
+  const supabaseUrl = Deno.env.get('SUPABASE_URL') ?? ''
+  const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
+
+  const supabaseAdmin = createClient(supabaseUrl, serviceKey)
+  const supabaseUser = createClient(supabaseUrl, anonKey, {
+    global: { headers: { Authorization: authHeader } },
+  })
+
+  const token = authHeader.replace('Bearer ', '')
+  const {
+    data: { user },
+    error: userError,
+  } = await supabaseUser.auth.getUser(token)
+
+  if (userError || !user) {
+    throw new Error('Authentication required to test saved credentials')
+  }
+
+  const { data: adminRole } = await supabaseAdmin
+    .from('user_roles')
+    .select('role')
+    .eq('user_id', user.id)
+    .eq('role', 'admin')
+    .maybeSingle()
+
+  if (!adminRole) {
+    throw new Error('Only administrators can test saved integration credentials')
+  }
+
+  const { data: integration, error: integrationError } = await supabaseAdmin
+    .from('organization_integrations')
+    .select('config')
+    .eq('provider_id', providerId)
+    .eq('user_id', user.id)
+    .maybeSingle()
+
+  if (integrationError) throw integrationError
+
+  const storedConfig = (integration?.config ?? {}) as Record<string, unknown>
+  if (Object.keys(storedConfig).length === 0) {
+    throw new Error('No saved credentials found. Enter your API key and save before testing.')
+  }
+
+  const sensitiveKeys = await getSensitiveFieldKeysForProvider(supabaseAdmin, providerId)
+  const decrypted = await decryptStoredIntegrationConfig(storedConfig, sensitiveKeys)
+
+  const merged: Record<string, string> = { ...incoming }
+  for (const [key, value] of Object.entries(incoming)) {
+    if (typeof value !== 'string' || !isMaskedCredential(value)) continue
+    const stored = decrypted[key]
+    if (typeof stored === 'string' && stored.trim()) {
+      merged[key] = stored
+    }
+  }
+
+  return merged
 }
 
 serve(async (req) => {
@@ -43,7 +243,22 @@ serve(async (req) => {
     
     // Handle frontend format with provider/credentials
     const provider = requestBody.provider as string | undefined;
-    const credentials = requestBody.credentials as Record<string, string> | undefined;
+    let credentials = requestBody.credentials as Record<string, string> | undefined;
+    const providerId = requestBody.provider_id as string | undefined;
+    const authHeader = req.headers.get('Authorization');
+
+    // Integration Hub: replace __CONFIGURED__ placeholders with decrypted stored values
+    if (provider && credentials && providerId && authHeader?.startsWith('Bearer ')) {
+      try {
+        credentials = await mergeIntegrationHubCredentials(authHeader, providerId, credentials);
+      } catch (mergeError: unknown) {
+        const message = mergeError instanceof Error ? mergeError.message : 'Failed to load saved credentials';
+        return new Response(
+          JSON.stringify({ valid: false, message, details: {} }),
+          { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 200 },
+        );
+      }
+    }
 
     // Health check / deployment test - no external calls (ping or empty body)
     if (ping === true || (requestBody && Object.keys(requestBody).length === 0)) {
@@ -173,6 +388,9 @@ serve(async (req) => {
         break
       case 'perplexity':
         validationResult = await validatePerplexity(apiKey)
+        break
+      case 'openrouter':
+        validationResult = await validateOpenRouter(apiKey)
         break
       case 'salesforce':
         validationResult = await validateSalesforce(apiKey)
@@ -452,6 +670,65 @@ async function validateGoogleAI(apiKey: string) {
     return {
       valid: false,
       message: `Google AI validation error: ${message}`,
+      details: {},
+    }
+  }
+}
+
+// Validate OpenRouter API key (inline — validate-api-key deploy bundle does not include _shared/)
+async function validateOpenRouter(apiKey: string) {
+  const trimmed = apiKey.trim()
+  if (!trimmed) {
+    return {
+      valid: false,
+      message: 'OpenRouter API key is required',
+      details: {},
+    }
+  }
+
+  try {
+    const response = await fetch('https://openrouter.ai/api/v1/models', {
+      method: 'GET',
+      headers: {
+        'Authorization': `Bearer ${trimmed}`,
+        'Content-Type': 'application/json',
+      },
+    })
+
+    if (response.ok) {
+      const data = await response.json()
+      return {
+        valid: true,
+        message: 'OpenRouter API key is valid',
+        details: {
+          models_count: Array.isArray(data?.data) ? data.data.length : 0,
+        },
+      }
+    }
+
+    const errorData = await response.json().catch(() => ({}))
+    const apiMessage =
+      (errorData as { error?: { message?: string } })?.error?.message ||
+      (errorData as { message?: string })?.message
+
+    if (response.status === 401 || response.status === 403) {
+      return {
+        valid: false,
+        message: apiMessage || 'Invalid OpenRouter API key',
+        details: { status: response.status },
+      }
+    }
+
+    return {
+      valid: false,
+      message: apiMessage || `OpenRouter validation failed (${response.status})`,
+      details: { status: response.status },
+    }
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Unknown error'
+    return {
+      valid: false,
+      message: `OpenRouter validation error: ${message}`,
       details: {},
     }
   }
