@@ -598,3 +598,9 @@ verify_jwt = false
 
 [functions.graphify-coverage]
 verify_jwt = false
+
+[functions.storage-settings]
+verify_jwt = false
+
+[functions.knowledge-file-storage]
+verify_jwt = false

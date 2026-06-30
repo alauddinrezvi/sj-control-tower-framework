@@ -15,6 +15,7 @@ import RoleBuilder from "@/pages/admin/RoleBuilder";
 import PermissionMatrix from "@/pages/admin/PermissionMatrix";
 import ActivityLogs from "@/pages/admin/ActivityLogs";
 import SystemSettings from "@/pages/admin/SystemSettings";
+import StorageSettings from "@/pages/admin/StorageSettings";
 import ProjectStatusSettings from "@/pages/admin/ProjectStatusSettings";
 import ProjectModules from "@/pages/admin/ProjectModules";
 
@@ -145,6 +146,7 @@ export const adminRoutes = (
     {/* System — Settings hub routes */}
     {/* /admin/settings (root) → legacy SystemSettings → redirects to /admin/settings/branding */}
     <Route path="/admin/settings" element={<SystemSettings />} />
+    <Route path="/admin/storage" element={<StorageSettings />} />
     <Route path="/admin/settings/branding" element={<BrandingSettings />} />
     <Route path="/admin/settings/workspace" element={<Navigate to="/admin/settings/branding" replace />} />
     <Route path="/admin/settings/notifications" element={<Navigate to="/admin/notifications?tab=email" replace />} />
