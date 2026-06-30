@@ -262,15 +262,18 @@ export function useTestConnection() {
   return useMutation({
     mutationFn: async ({
       providerSlug,
+      providerId,
       credentials,
     }: {
       providerSlug: string;
+      providerId?: string;
       credentials: Record<string, any>;
     }) => {
       // Call the validate-api-key edge function
       const { data, error } = await supabase.functions.invoke('validate-api-key', {
         body: {
           provider: providerSlug,
+          provider_id: providerId,
           credentials,
         },
       });

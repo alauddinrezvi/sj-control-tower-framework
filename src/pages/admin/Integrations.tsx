@@ -305,7 +305,7 @@ export default function Integrations() {
                               }
                             ).orgIntegration
                           }
-                          isDefaultAIProvider={isAiDefault && isCategoryLocked}
+                          isDefaultAIProvider={isAiDefault}
                           isPrimaryProvider={isPrimary && isCategoryLocked}
                           isInactiveForCategory={
                             Boolean(pref?.active_slugs?.length) && !isActive

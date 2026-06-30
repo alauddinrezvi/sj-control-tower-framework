@@ -18,14 +18,33 @@ interface AIModelPolicy {
   user_visible_models: UserVisibleModels
 }
 
-const AI_INTEGRATION_SLUGS = ['openai', 'anthropic', 'google-gemini', 'perplexity'] as const
+const AI_INTEGRATION_SLUGS = ['openai', 'anthropic', 'google-gemini', 'perplexity', 'openrouter'] as const
 
 const INTEGRATION_TO_AI_PROVIDER_SLUG: Record<string, string> = {
   openai: 'openai',
   anthropic: 'anthropic',
   'google-gemini': 'google',
   perplexity: 'perplexity',
+  openrouter: 'openrouter',
 }
+
+const AI_PROVIDER_TO_INTEGRATION_SLUG: Record<string, string> = {
+  openai: 'openai',
+  anthropic: 'anthropic',
+  google: 'google-gemini',
+  perplexity: 'perplexity',
+  openrouter: 'openrouter',
+}
+
+const ENCRYPTED_VALUE_PREFIX = 'v1:'
+const SENSITIVE_KEY_PATTERNS = [
+  /api[_-]?key$/i,
+  /client[_-]?secret$/i,
+  /[_-]secret$/i,
+  /[_-]token$/i,
+  /password$/i,
+  /private[_-]?key$/i,
+]
 
 const DEFAULT_AI_MODEL_POLICY: AIModelPolicy = {
   selection_mode: 'user_choice',
@@ -188,6 +207,192 @@ async function getApiKey(supabase: SupabaseClient, secretName: string): Promise<
   return data.value
 }
 
+function readConfigString(config: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = config[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+function isEncryptedConfigValue(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith(ENCRYPTED_VALUE_PREFIX)
+}
+
+function isSensitiveIntegrationFieldKey(fieldKey: string): boolean {
+  return SENSITIVE_KEY_PATTERNS.some((pattern) => pattern.test(fieldKey))
+}
+
+class IntegrationConfigDecryption {
+  private static readonly VERSION = 'v1'
+  private static readonly ALGORITHM = 'AES-GCM'
+  private static readonly IV_LENGTH = 12
+  private static readonly TAG_LENGTH = 16
+
+  static async decrypt(ciphertext: string, keyString: string): Promise<string> {
+    const parts = ciphertext.split(':')
+    if (parts.length !== 3) throw new Error('Invalid ciphertext format')
+    const [version, ivBase64, encryptedBase64] = parts
+    if (version !== this.VERSION) throw new Error(`Unsupported version: ${version}`)
+    const iv = this.base64ToArrayBuffer(ivBase64)
+    const encrypted = this.base64ToArrayBuffer(encryptedBase64)
+    const key = await this.deriveKey(keyString)
+    const decrypted = await crypto.subtle.decrypt(
+      { name: this.ALGORITHM, iv, tagLength: this.TAG_LENGTH * 8 } as AesGcmParams,
+      key,
+      encrypted as BufferSource,
+    )
+    return new TextDecoder().decode(decrypted)
+  }
+
+  private static async deriveKey(keyString: string): Promise<CryptoKey> {
+    const encoder = new TextEncoder()
+    const baseKey = await crypto.subtle.importKey(
+      'raw',
+      encoder.encode(keyString),
+      { name: 'PBKDF2' },
+      false,
+      ['deriveBits', 'deriveKey'],
+    )
+    return await crypto.subtle.deriveKey(
+      {
+        name: 'PBKDF2',
+        salt: encoder.encode('sj-integration-config-salt'),
+        iterations: 100000,
+        hash: 'SHA-256',
+      },
+      baseKey,
+      { name: this.ALGORITHM, length: 256 },
+      false,
+      ['encrypt', 'decrypt'],
+    )
+  }
+
+  private static base64ToArrayBuffer(base64: string): Uint8Array {
+    const binary = atob(base64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    return bytes
+  }
+}
+
+function getIntegrationEncryptionKey(): string {
+  const key = Deno.env.get('ENCRYPTION_KEY')?.trim()
+  if (key && key.length >= 16) return key
+  const fallback = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')?.trim()
+  if (fallback) return fallback
+  throw new Error('ENCRYPTION_KEY is not configured')
+}
+
+async function decryptConfigValueIfNeeded(value: string): Promise<string> {
+  if (!value || !isEncryptedConfigValue(value)) return value
+  return await IntegrationConfigDecryption.decrypt(value, getIntegrationEncryptionKey())
+}
+
+async function decryptStoredIntegrationConfig(
+  config: Record<string, unknown>,
+  sensitiveKeys: Set<string>,
+): Promise<Record<string, unknown>> {
+  const result: Record<string, unknown> = { ...config }
+  for (const fieldKey of sensitiveKeys) {
+    const rawValue = config[fieldKey]
+    if (typeof rawValue !== 'string') continue
+    result[fieldKey] = await decryptConfigValueIfNeeded(rawValue)
+  }
+  for (const fieldKey of Object.keys(config)) {
+    if (sensitiveKeys.has(fieldKey)) continue
+    const rawValue = config[fieldKey]
+    if (typeof rawValue === 'string' && isEncryptedConfigValue(rawValue)) {
+      result[fieldKey] = await decryptConfigValueIfNeeded(rawValue)
+    }
+  }
+  return result
+}
+
+async function getSensitiveFieldKeysForProvider(
+  supabase: SupabaseClient,
+  providerId: string,
+): Promise<Set<string>> {
+  const { data, error } = await supabase
+    .from('integration_fields')
+    .select('field_key, is_sensitive')
+    .eq('provider_id', providerId)
+  if (error) throw error
+  const keys = new Set<string>()
+  for (const row of data ?? []) {
+    const fieldKey = row.field_key as string
+    if (row.is_sensitive === true || isSensitiveIntegrationFieldKey(fieldKey)) {
+      keys.add(fieldKey)
+    }
+  }
+  return keys
+}
+
+async function resolveIntegrationHubApiKey(
+  supabase: SupabaseClient,
+  integrationSlug: string,
+  userId?: string | null,
+): Promise<string | null> {
+  const { data: provider, error: providerError } = await supabase
+    .from('integration_providers')
+    .select('id')
+    .eq('slug', integrationSlug)
+    .maybeSingle()
+  if (providerError || !provider?.id) return null
+
+  const { data: integrations, error: integrationError } = await supabase
+    .from('organization_integrations')
+    .select('user_id, config, connection_status, enabled')
+    .eq('provider_id', provider.id)
+    .eq('connection_status', 'connected')
+    .eq('enabled', true)
+  if (integrationError || !integrations?.length) return null
+
+  const ranked = [...integrations].sort((a, b) => {
+    const score = (row: { user_id: string | null }) => {
+      if (userId && row.user_id === userId) return 0
+      if (row.user_id == null) return 1
+      return 2
+    }
+    return score(a) - score(b)
+  })
+
+  const storedConfig = (ranked[0]?.config ?? {}) as Record<string, unknown>
+  if (Object.keys(storedConfig).length === 0) return null
+
+  let config = storedConfig
+  try {
+    const sensitiveKeys = await getSensitiveFieldKeysForProvider(supabase, provider.id)
+    config = await decryptStoredIntegrationConfig(storedConfig, sensitiveKeys)
+  } catch (error) {
+    console.warn('[agent-conversation-chat] decrypt integration config failed:', error)
+  }
+
+  const apiKey = readConfigString(config, [
+    'api_key',
+    'apiKey',
+    'openrouter_api_key',
+    'openai_api_key',
+    'anthropic_api_key',
+    'google_api_key',
+    'perplexity_api_key',
+  ])
+  if (!apiKey || apiKey === '__CONFIGURED__' || apiKey.startsWith('•')) return null
+  return apiKey
+}
+
+async function resolveProviderApiKey(
+  supabase: SupabaseClient,
+  provider: NonNullable<AIModel['ai_providers']>,
+  userId?: string | null,
+): Promise<string | null> {
+  const envKey = await getApiKey(supabase, provider.api_key_secret_name)
+  if (envKey) return envKey
+
+  const integrationSlug = AI_PROVIDER_TO_INTEGRATION_SLUG[provider.slug] ?? provider.slug
+  return await resolveIntegrationHubApiKey(supabase, integrationSlug, userId)
+}
+
 async function getModel(
   supabase: SupabaseClient,
   modelId?: string,
@@ -324,10 +529,38 @@ async function chatPerplexity(apiKey: string, request: ChatCompletionRequest): P
   }
 }
 
+async function chatOpenRouter(apiKey: string, request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
+  const baseUrl = Deno.env.get('OPENROUTER_API_BASE_URL')?.trim() || 'https://openrouter.ai/api/v1'
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': Deno.env.get('SITE_URL')?.trim() || 'https://localhost',
+      'X-Title': 'SJ Control Tower',
+    },
+    body: JSON.stringify({
+      model: request.model || 'deepseek/deepseek-r1',
+      messages: request.messages,
+      temperature: request.temperature ?? 0.7,
+      max_tokens: request.max_tokens ?? 1000,
+    }),
+  })
+  if (!response.ok) throw new Error(`OpenRouter API error: ${await response.text()}`)
+  const data = await response.json()
+  return {
+    content: data.choices[0].message.content,
+    input_tokens: data.usage?.prompt_tokens ?? 0,
+    output_tokens: data.usage?.completion_tokens ?? 0,
+    model: data.model ?? request.model ?? 'deepseek/deepseek-r1',
+  }
+}
+
 async function chatCompletion(
   supabase: SupabaseClient,
   request: ChatCompletionRequest,
-  modelId?: string
+  modelId?: string,
+  userId?: string | null,
 ): Promise<ChatCompletionResponse> {
   let model = await getModel(supabase, modelId, 'chat')
   if (!model) {
@@ -364,7 +597,7 @@ async function chatCompletion(
     }
     throw new Error('No valid chat model found')
   }
-  const apiKey = await getApiKey(supabase, model.ai_providers.api_key_secret_name)
+  const apiKey = await resolveProviderApiKey(supabase, model.ai_providers, userId)
   if (!apiKey) throw new Error(`API key not configured for ${model.ai_providers.name}`)
   const requestWithModel = { ...request, model: model.model_id }
   switch (model.ai_providers.slug) {
@@ -372,6 +605,7 @@ async function chatCompletion(
     case 'anthropic': return chatAnthropic(apiKey, requestWithModel)
     case 'google': return chatGoogle(apiKey, requestWithModel)
     case 'perplexity': return chatPerplexity(apiKey, requestWithModel)
+    case 'openrouter': return chatOpenRouter(apiKey, requestWithModel)
     default: throw new Error(`Unsupported provider: ${model.ai_providers.slug}`)
   }
 }
@@ -1845,7 +2079,8 @@ serve(async (req) => {
           response = await chatCompletion(
             supabaseClient,
             { messages, max_tokens: maxTokens, temperature },
-            effectiveModelId
+            effectiveModelId,
+            user_id,
           );
         }
       } else {
@@ -1861,7 +2096,8 @@ serve(async (req) => {
         response = await chatCompletion(
           supabaseClient,
           { messages, max_tokens: maxTokens, temperature },
-          effectiveModelId
+          effectiveModelId,
+          user_id,
         )
       }
     } else {
@@ -1872,7 +2108,8 @@ serve(async (req) => {
           max_tokens: maxTokens,
           temperature,
         },
-        effectiveModelId
+        effectiveModelId,
+        user_id,
       )
     }
 
