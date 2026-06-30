@@ -1,14 +1,5 @@
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import {
-  useKnowledgeEntries,
-  useKnowledgeCategories,
-} from "../hooks/useKnowledge";
-import { useAuth } from "@/contexts/AuthContext";
-import {
-  useSyncConfluenceKnowledge,
-  useSyncSharePointKnowledge,
-} from "@/hooks/useIntegrationSync";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -20,413 +11,949 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Download,
+  Edit,
+  FileText,
+  Folder,
+  Grid2X2,
+  Home,
+  Keyboard,
+  List,
+  MoreVertical,
+  MoveRight,
   Plus,
   Search,
-  Eye,
-  FileText,
+  Share2,
+  Star,
+  Trash2,
   Upload,
-  TrendingUp,
-  Clock,
-  FolderTree,
-  Sparkles,
-  BookOpen,
-  RefreshCw,
+  EyeOff,
 } from "lucide-react";
-import { formatDate, truncateText } from "@/lib/utils";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
+import { ActiveStorageIndicator } from "../components/ActiveStorageIndicator";
+import { ManageAccessModal } from "../components/ManageAccessModal";
+import {
+  isFileOnActiveStorage,
+  STORAGE_PROVIDER_LABELS,
+  useActiveStorageType,
+} from "../hooks/useActiveStorageType";
+import { useAuth } from "@/contexts/AuthContext";
+import { useToast } from "@/hooks/use-toast";
+import { cn, formatDate } from "@/lib/utils";
+import {
+  buildDuplicateResolutions,
+  findDuplicateFiles,
+  type DuplicateFile,
+  type DuplicateResolutionStrategy,
+} from "../utils/duplicateHandler";
+import {
+  createFolder,
+  deleteFile,
+  deleteFolder,
+  downloadFile,
+  hideSharedResource,
+  listFiles,
+  listFolders,
+  updateFile,
+  updateFolder,
+  uploadFiles,
+  type KnowledgeFile,
+  type KnowledgeFolder,
+  type SharedUser,
+} from "../api/file";
 
-// Map icon names to components
-const iconMap: Record<string, React.ElementType> = {
-  FolderTree,
-  BookOpen,
-  FileText,
+type ViewMode = "grid" | "list";
+type DialogName =
+  | "createFolder"
+  | "editFolder"
+  | "upload"
+  | "duplicates"
+  | "renameFile"
+  | "moveFile"
+  | "shortcuts"
+  | null;
+
+interface ManageAccessTarget {
+  type: "file" | "folder";
+  id: string;
+  name: string;
+  ownerId: string;
+  sharedWith: SharedUser[];
+}
+
+const KNOWLEDGE_QUERY_KEYS = {
+  folders: ["knowledge", "file-manager", "folders"] as const,
+  files: (folderId: string | null) => ["knowledge", "file-manager", "files", folderId] as const,
 };
 
-const CATEGORY_COLORS: Record<string, string> = {
-  blue: "bg-blue-500",
-  green: "bg-green-500",
-  yellow: "bg-yellow-500",
-  red: "bg-red-500",
-  purple: "bg-purple-500",
-  pink: "bg-pink-500",
-  indigo: "bg-indigo-500",
-  orange: "bg-orange-500",
-  teal: "bg-teal-500",
-  cyan: "bg-cyan-500",
-};
+function isOwner(item: KnowledgeFolder | KnowledgeFile, userId?: string): boolean {
+  return Boolean(userId && item.userId === userId);
+}
 
-export default function Knowledge() {
-  const [search, setSearch] = useState("");
-  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
-  const { profile } = useAuth();
-  const syncConfluence = useSyncConfluenceKnowledge();
-  const syncSharePoint = useSyncSharePointKnowledge();
-  const canAdminSync =
-    profile?.role === "admin" || profile?.role === "moderator";
+function matchesSearch(value: string, searchTerm: string): boolean {
+  return value.toLowerCase().includes(searchTerm.trim().toLowerCase());
+}
 
-  const { data: categories = [] } = useKnowledgeCategories();
-  const { data: allEntries = [], isLoading } = useKnowledgeEntries({});
-  const { data: filteredEntries = [] } = useKnowledgeEntries({
-    search,
-    category_id: selectedCategory || undefined,
+function selectedFolderLabel(folderId: string | null, folders: KnowledgeFolder[]): string {
+  if (!folderId) {
+    return "Home";
+  }
+
+  return folders.find((folder) => folder.id === folderId)?.name ?? "Folder";
+}
+
+export default function Knowledge(): JSX.Element {
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const [currentFolder, setCurrentFolder] = useState<string | null>(null);
+  const [searchTerm, setSearchTerm] = useState("");
+  const [folderViewMode, setFolderViewMode] = useState<ViewMode>("grid");
+  const [fileViewMode, setFileViewMode] = useState<ViewMode>("grid");
+  const [activeDialog, setActiveDialog] = useState<DialogName>(null);
+  const [folderName, setFolderName] = useState("");
+  const [folderColor, setFolderColor] = useState("#6b7280");
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [duplicates, setDuplicates] = useState<DuplicateFile[]>([]);
+  const [selectedFile, setSelectedFile] = useState<KnowledgeFile | null>(null);
+  const [selectedFolder, setSelectedFolder] = useState<KnowledgeFolder | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [moveFolderId, setMoveFolderId] = useState<string>("root");
+  const [manageAccessTarget, setManageAccessTarget] = useState<ManageAccessTarget | null>(null);
+
+  const foldersQuery = useQuery({
+    queryKey: KNOWLEDGE_QUERY_KEYS.folders,
+    queryFn: listFolders,
   });
 
-  // Stats calculations
-  const totalEntries = allEntries.length;
-  const publishedEntries = allEntries.filter((e) => e.status === "published").length;
-  const totalCategories = categories.length;
+  const filesQuery = useQuery({
+    queryKey: KNOWLEDGE_QUERY_KEYS.files(currentFolder),
+    queryFn: () => listFiles({ folderId: currentFolder }),
+  });
 
-  // Get recent and popular entries
-  const recentlyAdded = [...allEntries]
-    .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-    .slice(0, 5);
+  const activeStorageQuery = useActiveStorageType();
+  const activeStorageType = activeStorageQuery.data?.storageType ?? "local";
 
-  const popularEntries = [...allEntries]
-    .sort((a, b) => (b.view_count || 0) - (a.view_count || 0))
-    .slice(0, 5);
+  const folders = useMemo(() => foldersQuery.data ?? [], [foldersQuery.data]);
+  const files = useMemo(() => filesQuery.data?.data ?? [], [filesQuery.data?.data]);
+  const loadingFolders = foldersQuery.isLoading;
+  const loadingFiles = filesQuery.isLoading;
+  const currentFolderName = selectedFolderLabel(currentFolder, folders);
 
-  // Display entries based on search/filter
-  const displayEntries = search || selectedCategory ? filteredEntries : allEntries;
+  const visibleFolders = useMemo(
+    () => (currentFolder ? [] : folders.filter((folder) => matchesSearch(folder.name, searchTerm))),
+    [currentFolder, folders, searchTerm],
+  );
 
-  const getCategoryIcon = (iconName?: string | null) => {
-    const Icon = iconName ? iconMap[iconName] || FolderTree : FolderTree;
-    return Icon;
+  const visibleFiles = useMemo(
+    () => files.filter((file) => matchesSearch(file.name, searchTerm)),
+    [files, searchTerm],
+  );
+
+  const refreshKnowledge = async (): Promise<void> => {
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: KNOWLEDGE_QUERY_KEYS.folders }),
+      queryClient.invalidateQueries({ queryKey: KNOWLEDGE_QUERY_KEYS.files(currentFolder) }),
+    ]);
   };
 
+  const createFolderMutation = useMutation({
+    mutationFn: () => createFolder(folderName, folderColor),
+    onSuccess: async () => {
+      setActiveDialog(null);
+      setFolderName("");
+      await refreshKnowledge();
+      toast({ title: "Folder created", description: "Your folder is ready." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Folder creation failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const updateFolderMutation = useMutation({
+    mutationFn: ({ folderId, sharedWith }: { folderId: string; sharedWith?: SharedUser[] }) =>
+      updateFolder(folderId, {
+        name: folderName || undefined,
+        color: folderColor,
+        sharedWith,
+      }),
+    onSuccess: async () => {
+      setActiveDialog(null);
+      setSelectedFolder(null);
+      await refreshKnowledge();
+      toast({ title: "Folder updated", description: "Folder changes were saved." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Folder update failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const deleteFolderMutation = useMutation({
+    mutationFn: deleteFolder,
+    onSuccess: async () => {
+      if (selectedFolder?.id === currentFolder) {
+        setCurrentFolder(null);
+      }
+      await refreshKnowledge();
+      toast({ title: "Folder deleted", description: "The folder was removed." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Folder delete failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const uploadMutation = useMutation({
+    mutationFn: (filesToUpload: File[]) => uploadFiles(filesToUpload, currentFolder),
+    onSuccess: async (uploaded) => {
+      setActiveDialog(null);
+      setSelectedFiles([]);
+      setDuplicates([]);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+      await refreshKnowledge();
+      toast({ title: "Upload complete", description: `${uploaded.length} file(s) uploaded.` });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Upload failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const updateFileMutation = useMutation({
+    mutationFn: ({ fileId, input }: { fileId: string; input: Parameters<typeof updateFile>[1] }) =>
+      updateFile(fileId, input),
+    onSuccess: async () => {
+      setActiveDialog(null);
+      setSelectedFile(null);
+      await refreshKnowledge();
+      toast({ title: "File updated", description: "File changes were saved." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "File update failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const hideSharedItemMutation = useMutation({
+    mutationFn: ({ resourceType, resourceId }: { resourceType: "file" | "folder"; resourceId: string }) =>
+      hideSharedResource(resourceType, resourceId),
+    onSuccess: async (_data, variables) => {
+      if (variables.resourceType === "folder" && currentFolder === variables.resourceId) {
+        setCurrentFolder(null);
+      }
+      await refreshKnowledge();
+      toast({ title: "Removed from Knowledge Base", description: "This shared item was hidden from your list." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Could not remove item", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const saveAccessMutation = useMutation({
+    mutationFn: async ({ target, sharedWith }: { target: ManageAccessTarget; sharedWith: SharedUser[] }) => {
+      if (target.type === "file") {
+        return updateFile(target.id, { sharedWith });
+      }
+      return updateFolder(target.id, { sharedWith });
+    },
+    onSuccess: async () => {
+      setManageAccessTarget(null);
+      await refreshKnowledge();
+      toast({ title: "Access updated", description: "Sharing settings were saved." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "Failed to update access", description: error.message, variant: "destructive" });
+    },
+  });
+
+  const deleteFileMutation = useMutation({
+    mutationFn: deleteFile,
+    onSuccess: async () => {
+      await refreshKnowledge();
+      toast({ title: "File deleted", description: "The file was removed." });
+    },
+    onError: (error: Error) => {
+      toast({ title: "File delete failed", description: error.message, variant: "destructive" });
+    },
+  });
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent): void => {
+      if (event.ctrlKey && event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        setActiveDialog("createFolder");
+      }
+
+      if (event.ctrlKey && event.key.toLowerCase() === "u") {
+        event.preventDefault();
+        setActiveDialog("upload");
+      }
+
+      if (event.ctrlKey && event.key.toLowerCase() === "f") {
+        event.preventDefault();
+        searchInputRef.current?.focus();
+      }
+
+      if (event.shiftKey && event.key === "?") {
+        event.preventDefault();
+        setActiveDialog("shortcuts");
+      }
+
+      if (event.key === "Escape") {
+        setActiveDialog(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  const startEditFolder = (folder: KnowledgeFolder): void => {
+    setSelectedFolder(folder);
+    setFolderName(folder.name);
+    setFolderColor(folder.color);
+    setActiveDialog("editFolder");
+  };
+
+  const openManageAccess = (target: ManageAccessTarget): void => {
+    setManageAccessTarget(target);
+  };
+
+  const startShareFolder = (folder: KnowledgeFolder): void => {
+    openManageAccess({
+      type: "folder",
+      id: folder.id,
+      name: folder.name,
+      ownerId: folder.userId ?? user?.id ?? "",
+      sharedWith: folder.sharedWith,
+    });
+  };
+
+  const startRenameFile = (file: KnowledgeFile): void => {
+    setSelectedFile(file);
+    setRenameValue(file.name);
+    setActiveDialog("renameFile");
+  };
+
+  const startMoveFile = (file: KnowledgeFile): void => {
+    setSelectedFile(file);
+    setMoveFolderId(file.folderId ?? "root");
+    setActiveDialog("moveFile");
+  };
+
+  const startShareFile = (file: KnowledgeFile): void => {
+    openManageAccess({
+      type: "file",
+      id: file.id,
+      name: file.name,
+      ownerId: file.userId ?? user?.id ?? "",
+      sharedWith: file.sharedWith,
+    });
+  };
+
+  const handleFileSelection = (fileList: FileList | null): void => {
+    setSelectedFiles(Array.from(fileList ?? []));
+  };
+
+  const submitUpload = (): void => {
+    if (selectedFiles.length === 0) {
+      toast({ title: "No files selected", description: "Choose at least one file to upload.", variant: "destructive" });
+      return;
+    }
+
+    const duplicateFiles = findDuplicateFiles(selectedFiles, files);
+
+    if (duplicateFiles.length > 0) {
+      setDuplicates(duplicateFiles);
+      setActiveDialog("duplicates");
+      return;
+    }
+
+    uploadMutation.mutate(selectedFiles);
+  };
+
+  const resolveDuplicates = async (strategy: DuplicateResolutionStrategy): Promise<void> => {
+    const resolutions = buildDuplicateResolutions(selectedFiles, duplicates, strategy);
+    const overwriteIds = resolutions
+      .map((resolution) => resolution.existingFileId)
+      .filter((id): id is string => Boolean(id));
+
+    for (const fileId of overwriteIds) {
+      await deleteFile(fileId);
+    }
+
+    uploadMutation.mutate(resolutions.map((resolution) => resolution.file));
+  };
+
+  const renderFolderCard = (folder: KnowledgeFolder): JSX.Element => {
+    const owner = isOwner(folder, user?.id);
+
+    return (
+      <Card key={folder.id} className="transition-shadow hover:shadow-md">
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-3">
+            <button
+              type="button"
+              className="flex flex-1 items-center gap-3 text-left"
+              onClick={() => setCurrentFolder(folder.id)}
+            >
+              <span className="flex h-10 w-10 items-center justify-center rounded-lg" style={{ background: folder.color }}>
+                <Folder className="h-5 w-5 text-white" />
+              </span>
+              <span>
+                <CardTitle className="line-clamp-1 text-base">{folder.name}</CardTitle>
+                <CardDescription>
+                  {folder.fileCount} file{folder.fileCount === 1 ? "" : "s"}
+                </CardDescription>
+              </span>
+            </button>
+            <FolderMenu folder={folder} owner={owner} />
+          </div>
+        </CardHeader>
+        <CardContent className="flex items-center justify-between text-xs text-muted-foreground">
+          <span>{formatDate(folder.modified)}</span>
+          {folder.sharedWith.length > 0 && <Badge variant="outline">Shared</Badge>}
+        </CardContent>
+      </Card>
+    );
+  };
+
+  const renderFileCard = (file: KnowledgeFile): JSX.Element => {
+    const owner = isOwner(file, user?.id);
+    const storageActive = isFileOnActiveStorage(file.storageType, activeStorageType);
+    const fileStorageLabel = STORAGE_PROVIDER_LABELS[file.storageType ?? "local"];
+
+    const card = (
+      <Card
+        className={cn(
+          "transition-all",
+          storageActive
+            ? "hover:shadow-md"
+            : "cursor-not-allowed border-dashed opacity-55 grayscale hover:opacity-45",
+        )}
+      >
+        <CardHeader className="pb-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span
+                className={cn(
+                  "flex h-10 w-10 items-center justify-center rounded-lg",
+                  storageActive ? "bg-primary/10" : "bg-muted",
+                )}
+              >
+                <FileText className={cn("h-5 w-5", storageActive ? "text-primary" : "text-muted-foreground")} />
+              </span>
+              <div>
+                <CardTitle className={cn("line-clamp-1 text-base", !storageActive && "text-muted-foreground")}>
+                  {file.name}
+                </CardTitle>
+                <CardDescription>{file.size}</CardDescription>
+              </div>
+            </div>
+            {storageActive || !owner ? (
+              <FileMenu file={file} owner={owner} storageActive={storageActive} />
+            ) : (
+              <Button variant="ghost" size="icon" disabled className="pointer-events-none opacity-30" tabIndex={-1}>
+                <MoreVertical className="h-4 w-4" />
+              </Button>
+            )}
+          </div>
+        </CardHeader>
+        <CardContent className="space-y-3 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge variant="secondary">{file.type}</Badge>
+            <Badge variant={storageActive ? "secondary" : "outline"}>{file.storageType ?? "local"}</Badge>
+            {!storageActive && (
+              <Badge variant="outline" className="border-amber-300 bg-amber-50 text-amber-800">
+                Inactive
+              </Badge>
+            )}
+            {file.sharedWith.length > 0 && <Badge variant="outline">Shared</Badge>}
+            {!owner && <Badge variant="outline">Shared with me</Badge>}
+          </div>
+          {!storageActive && (
+            <p className="text-xs text-amber-700">
+              Stored on {fileStorageLabel}. Switch active storage to manage this file.
+            </p>
+          )}
+          <div className="flex items-center justify-between">
+            <span>{formatDate(file.modified)}</span>
+            {file.isStarred && <Star className="h-4 w-4 fill-yellow-400 text-yellow-400" />}
+          </div>
+        </CardContent>
+      </Card>
+    );
+
+    if (storageActive) {
+      return <div key={file.id}>{card}</div>;
+    }
+
+    return (
+      <Tooltip key={file.id}>
+        <TooltipTrigger asChild>
+          <div className="h-full">{card}</div>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-xs">
+          This file is on {fileStorageLabel}. Enable {fileStorageLabel} in Admin → Storage to rename, move, or delete it.
+        </TooltipContent>
+      </Tooltip>
+    );
+  };
+
+  const FolderMenu = ({ folder, owner }: { folder: KnowledgeFolder; owner: boolean }): JSX.Element => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon">
+          <MoreVertical className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {owner ? (
+          <>
+            <DropdownMenuItem onClick={() => startEditFolder(folder)}>
+              <Edit className="mr-2 h-4 w-4" />
+              Edit
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => startShareFolder(folder)}>
+              <Share2 className="mr-2 h-4 w-4" />
+              Manage access
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              className="text-destructive"
+              onClick={() => {
+                if (window.confirm(`Delete "${folder.name}"? Files inside will move to root.`)) {
+                  setSelectedFolder(folder);
+                  deleteFolderMutation.mutate(folder.id);
+                }
+              }}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </>
+        ) : (
+          <DropdownMenuItem
+            onClick={() => hideSharedItemMutation.mutate({ resourceType: "folder", resourceId: folder.id })}
+          >
+            <EyeOff className="mr-2 h-4 w-4" />
+            Remove from my Knowledge Base
+          </DropdownMenuItem>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
+  const FileMenu = ({
+    file,
+    owner,
+    storageActive,
+  }: {
+    file: KnowledgeFile;
+    owner: boolean;
+    storageActive: boolean;
+  }): JSX.Element => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="icon">
+          <MoreVertical className="h-4 w-4" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        {owner ? (
+          <>
+            <DropdownMenuItem
+              disabled={!storageActive}
+              onClick={() => {
+                void downloadFile(file).catch((error: unknown) => {
+                  toast({
+                    title: "Download failed",
+                    description: error instanceof Error ? error.message : "Unable to download file",
+                    variant: "destructive",
+                  });
+                });
+              }}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Download
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={!storageActive}
+              onClick={() => updateFileMutation.mutate({ fileId: file.id, input: { isStarred: !file.isStarred } })}
+            >
+              <Star className="mr-2 h-4 w-4" />
+              {file.isStarred ? "Unstar" : "Star"}
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={!storageActive} onClick={() => startRenameFile(file)}>
+              <Edit className="mr-2 h-4 w-4" />
+              Rename
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={!storageActive} onClick={() => startMoveFile(file)}>
+              <MoveRight className="mr-2 h-4 w-4" />
+              Move
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled={!storageActive} onClick={() => startShareFile(file)}>
+              <Share2 className="mr-2 h-4 w-4" />
+              Manage access
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              disabled={!storageActive}
+              className="text-destructive"
+              onClick={() => {
+                if (window.confirm(`Delete "${file.name}"?`)) {
+                  deleteFileMutation.mutate(file.id);
+                }
+              }}
+            >
+              <Trash2 className="mr-2 h-4 w-4" />
+              Delete
+            </DropdownMenuItem>
+          </>
+        ) : (
+          <>
+            <DropdownMenuItem
+              disabled={!storageActive}
+              onClick={() => {
+                void downloadFile(file).catch((error: unknown) => {
+                  toast({
+                    title: "Download failed",
+                    description: error instanceof Error ? error.message : "Unable to download file",
+                    variant: "destructive",
+                  });
+                });
+              }}
+            >
+              <Download className="mr-2 h-4 w-4" />
+              Download
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              onClick={() => hideSharedItemMutation.mutate({ resourceType: "file", resourceId: file.id })}
+            >
+              <EyeOff className="mr-2 h-4 w-4" />
+              Remove from my Knowledge Base
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
   return (
-    <div className="space-y-8">
-      {/* Hero Section */}
-      <div className="relative overflow-hidden rounded-xl bg-gradient-to-br from-primary/10 via-primary/5 to-background p-8 md:p-12">
-        <div className="relative z-10 mx-auto max-w-3xl space-y-6 text-center">
-          <div className="flex items-center justify-center gap-2">
-            <Sparkles className="h-6 w-6 text-primary" />
-            <h1 className="text-4xl font-bold tracking-tight">Knowledge Base</h1>
-          </div>
-          <p className="text-lg text-muted-foreground">
-            Discover insights, documentation, and resources powered by AI
-          </p>
+    <div className="space-y-6">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <h1 className="text-3xl font-bold tracking-tight">Knowledge Base</h1>
+          <p className="text-muted-foreground">Manage folders, files, sharing, and knowledge assets for agents and RAG.</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => setActiveDialog("shortcuts")}>
+            <Keyboard className="mr-2 h-4 w-4" />
+            Shortcuts
+          </Button>
+          <Button variant="outline" onClick={() => setActiveDialog("createFolder")}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Folder
+          </Button>
+          <Button onClick={() => setActiveDialog("upload")}>
+            <Upload className="mr-2 h-4 w-4" />
+            Upload Files
+          </Button>
+        </div>
+      </div>
 
-          {/* Search Bar */}
-          <div className="relative mx-auto max-w-2xl">
-            <Search className="absolute left-4 top-4 h-5 w-5 text-muted-foreground" />
-            <Input
-              placeholder="Search for articles, guides, documentation..."
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              className="h-14 rounded-full pl-12 pr-4 text-base shadow-lg"
-            />
-          </div>
+      <ActiveStorageIndicator />
 
-          {/* Quick Stats */}
-          <div className="flex flex-wrap items-center justify-center gap-6 pt-4">
-            <div className="flex items-center gap-2 text-sm">
-              <FileText className="h-4 w-4 text-primary" />
-              <span className="font-semibold">{publishedEntries}</span>
-              <span className="text-muted-foreground">Articles</span>
-            </div>
-            <div className="h-4 w-px bg-border" />
-            <div className="flex items-center gap-2 text-sm">
-              <FolderTree className="h-4 w-4 text-primary" />
-              <span className="font-semibold">{totalCategories}</span>
-              <span className="text-muted-foreground">Categories</span>
-            </div>
-            <div className="h-4 w-px bg-border" />
-            <div className="flex items-center gap-2 text-sm">
-              <Clock className="h-4 w-4 text-primary" />
-              <span className="text-muted-foreground">Updated daily</span>
-            </div>
-          </div>
-
-          {/* Action Buttons */}
-          <div className="flex flex-wrap items-center justify-center gap-3 pt-2">
-            <Button asChild size="lg">
-              <Link to="/knowledge/new">
-                <Plus className="mr-2 h-4 w-4" />
-                Add Entry
-              </Link>
+      <Card>
+        <CardContent className="flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-2 text-sm">
+            <Button variant="ghost" size="sm" onClick={() => setCurrentFolder(null)}>
+              <Home className="mr-2 h-4 w-4" />
+              Home
             </Button>
-            <Button variant="outline" size="lg" asChild>
-              <Link to="/knowledge/upload">
-                <Upload className="mr-2 h-4 w-4" />
-                Upload File
-              </Link>
-            </Button>
-            {canAdminSync && (
+            {currentFolder && (
               <>
-                <Button
-                  variant="outline"
-                  size="lg"
-                  type="button"
-                  onClick={() => syncConfluence.mutate()}
-                  disabled={syncConfluence.isPending}
-                >
-                  {syncConfluence.isPending ? (
-                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                  )}
-                  Sync from Confluence
-                </Button>
-                <Button
-                  variant="outline"
-                  size="lg"
-                  type="button"
-                  onClick={() => syncSharePoint.mutate()}
-                  disabled={syncSharePoint.isPending}
-                >
-                  {syncSharePoint.isPending ? (
-                    <RefreshCw className="mr-2 h-4 w-4 animate-spin" />
-                  ) : (
-                    <RefreshCw className="mr-2 h-4 w-4" />
-                  )}
-                  Sync from SharePoint
-                </Button>
+                <span className="text-muted-foreground">/</span>
+                <Badge variant="secondary">{currentFolderName}</Badge>
               </>
             )}
           </div>
-        </div>
-      </div>
+          <div className="relative w-full lg:max-w-sm">
+            <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
+            <Input
+              ref={searchInputRef}
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+              placeholder="Search visible folders and files..."
+              className="pl-9"
+            />
+          </div>
+        </CardContent>
+      </Card>
 
-      {/* Category Grid */}
-      {categories.length > 0 && (
-        <div className="space-y-4">
+      {!currentFolder && (
+        <section className="space-y-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold">Browse by Category</h2>
-            {selectedCategory && (
-              <Button
-                variant="ghost"
-                size="sm"
-                onClick={() => setSelectedCategory(null)}
-              >
-                Clear Filter
+            <h2 className="text-xl font-semibold">Folders</h2>
+            <div className="flex gap-1">
+              <Button variant={folderViewMode === "grid" ? "secondary" : "ghost"} size="icon" onClick={() => setFolderViewMode("grid")}>
+                <Grid2X2 className="h-4 w-4" />
               </Button>
-            )}
+              <Button variant={folderViewMode === "list" ? "secondary" : "ghost"} size="icon" onClick={() => setFolderViewMode("list")}>
+                <List className="h-4 w-4" />
+              </Button>
+            </div>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {categories.map((category) => {
-              const Icon = getCategoryIcon(category.icon);
-              const colorClass =
-                CATEGORY_COLORS[category.color || "blue"] || "bg-blue-500";
-              const entryCount = allEntries.filter(
-                (e) => e.category_id === category.id
-              ).length;
-
-              return (
-                <Card
-                  key={category.id}
-                  className={`cursor-pointer transition-all hover:shadow-md ${
-                    selectedCategory === category.id
-                      ? "border-primary ring-2 ring-primary/20"
-                      : ""
-                  }`}
-                  onClick={() =>
-                    setSelectedCategory(
-                      selectedCategory === category.id ? null : category.id
-                    )
-                  }
-                >
-                  <CardHeader className="pb-3">
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={`flex h-10 w-10 items-center justify-center rounded-lg ${colorClass} text-white`}
-                      >
-                        <Icon className="h-5 w-5" />
-                      </div>
-                      <div className="flex-1">
-                        <CardTitle className="text-base">
-                          {category.name}
-                        </CardTitle>
-                        <p className="text-xs text-muted-foreground">
-                          {entryCount} {entryCount === 1 ? "entry" : "entries"}
-                        </p>
-                      </div>
-                    </div>
-                  </CardHeader>
-                  {category.description && (
-                    <CardContent className="pt-0">
-                      <p className="line-clamp-2 text-xs text-muted-foreground">
-                        {category.description}
-                      </p>
-                    </CardContent>
-                  )}
-                </Card>
-              );
-            })}
-          </div>
-        </div>
+          {loadingFolders ? (
+            <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+              {Array.from({ length: 3 }).map((_, index) => (
+                <Skeleton key={index} className="h-28" />
+              ))}
+            </div>
+          ) : visibleFolders.length === 0 ? (
+            <Card className="p-6 text-center text-muted-foreground">No folders found.</Card>
+          ) : (
+            <div className={folderViewMode === "grid" ? "grid gap-4 sm:grid-cols-2 lg:grid-cols-3" : "space-y-3"}>
+              {visibleFolders.map(renderFolderCard)}
+            </div>
+          )}
+        </section>
       )}
 
-      {/* Recently Added Section */}
-      {!search && !selectedCategory && recentlyAdded.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <Clock className="h-5 w-5 text-primary" />
-            <h2 className="text-2xl font-bold">Recently Added</h2>
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-semibold">{currentFolder ? `${currentFolderName} Files` : "Root Files"}</h2>
+          <div className="flex gap-1">
+            <Button variant={fileViewMode === "grid" ? "secondary" : "ghost"} size="icon" onClick={() => setFileViewMode("grid")}>
+              <Grid2X2 className="h-4 w-4" />
+            </Button>
+            <Button variant={fileViewMode === "list" ? "secondary" : "ghost"} size="icon" onClick={() => setFileViewMode("list")}>
+              <List className="h-4 w-4" />
+            </Button>
           </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-            {recentlyAdded.map((entry) => (
-              <Link key={entry.id} to={`/knowledge/${entry.id}`}>
-                <Card className="h-full transition-all hover:shadow-md">
-                  <CardHeader>
-                    <CardTitle className="line-clamp-2 text-sm">
-                      {entry.title}
-                    </CardTitle>
-                    <CardDescription className="flex flex-wrap gap-1">
-                      {entry.knowledge_categories && (
-                        <Badge variant="outline" className="text-xs">
-                          {entry.knowledge_categories.name}
-                        </Badge>
-                      )}
-                      {entry.content && (
-                        <span className="text-xs text-muted-foreground">
-                          {Math.ceil(entry.content.split(/\s+/).length / 200)} min read
-                        </span>
-                      )}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="line-clamp-3 text-xs text-muted-foreground">
-                      {truncateText(entry.summary || entry.content, 100)}
-                    </p>
-                    <div className="mt-2 text-xs text-muted-foreground">
-                      {formatDate(entry.created_at)}
-                    </div>
-                  </CardContent>
-                </Card>
-              </Link>
+        </div>
+        {loadingFiles ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+            {Array.from({ length: 6 }).map((_, index) => (
+              <Skeleton key={index} className="h-36" />
             ))}
           </div>
-        </div>
-      )}
-
-      {/* Popular Section */}
-      {!search && !selectedCategory && popularEntries.length > 0 && (
-        <div className="space-y-4">
-          <div className="flex items-center gap-2">
-            <TrendingUp className="h-5 w-5 text-primary" />
-            <h2 className="text-2xl font-bold">Most Popular</h2>
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
-            {popularEntries.map((entry) => (
-              <Link key={entry.id} to={`/knowledge/${entry.id}`}>
-                <Card className="h-full transition-all hover:shadow-md">
-                  <CardHeader>
-                    <CardTitle className="line-clamp-2 text-sm">
-                      {entry.title}
-                    </CardTitle>
-                    <CardDescription className="flex items-center gap-2">
-                      <Eye className="h-3 w-3" />
-                      <span className="text-xs">{entry.view_count || 0} views</span>
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="line-clamp-3 text-xs text-muted-foreground">
-                      {truncateText(entry.summary || entry.content, 100)}
-                    </p>
-                  </CardContent>
-                </Card>
-              </Link>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* All Entries Section */}
-      <div className="space-y-4">
-        <h2 className="text-2xl font-bold">
-          {search
-            ? "Search Results"
-            : selectedCategory
-            ? "Filtered Entries"
-            : "All Entries"}
-        </h2>
-
-        {isLoading ? (
-          <div className="flex h-32 items-center justify-center">
-            <p className="text-muted-foreground">Loading knowledge entries...</p>
-          </div>
-        ) : displayEntries.length === 0 ? (
-          <Card className="p-12 text-center">
-            <FileText className="mx-auto mb-4 h-12 w-12 text-muted-foreground" />
-            <h3 className="mb-2 text-lg font-semibold">No entries found</h3>
-            <p className="mb-4 text-muted-foreground">
-              {search
-                ? "Try adjusting your search query"
-                : "Get started by adding your first knowledge entry"}
-            </p>
-            {!search && (
-              <Button variant="outline" size="sm" asChild>
-                <Link to="/knowledge/new">
-                  <Plus className="mr-2 h-4 w-4" />
-                  Add your first entry
-                </Link>
-              </Button>
-            )}
+        ) : visibleFiles.length === 0 ? (
+          <Card className="p-10 text-center">
+            <FileText className="mx-auto mb-3 h-10 w-10 text-muted-foreground" />
+            <h3 className="font-semibold">No files found</h3>
+            <p className="text-sm text-muted-foreground">Upload files to this location to connect them with knowledge workflows.</p>
           </Card>
         ) : (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {displayEntries.map((entry) => (
-              <Card key={entry.id} className="flex flex-col hover:shadow-md transition-all">
-                <CardHeader>
-                  <div className="flex items-start justify-between gap-2">
-                    <CardTitle className="line-clamp-2 text-base">
-                      {entry.title}
-                    </CardTitle>
-                    <FileText className="h-5 w-5 shrink-0 text-muted-foreground" />
-                  </div>
-                  <CardDescription className="flex flex-wrap items-center gap-2">
-                    {entry.knowledge_categories && (
-                      <Badge variant="outline" className="text-xs">
-                        {entry.knowledge_categories.name}
-                      </Badge>
-                    )}
-                    {entry.status && (
-                      <Badge variant="secondary" className="text-xs">
-                        {entry.status}
-                      </Badge>
-                    )}
-                    {entry.content && (
-                      <span className="text-xs text-muted-foreground">
-                        {Math.ceil(entry.content.split(/\s+/).length / 200)} min
-                      </span>
-                    )}
-                  </CardDescription>
-                </CardHeader>
-                <CardContent className="flex flex-1 flex-col justify-between gap-4">
-                  <p className="line-clamp-3 text-sm text-muted-foreground">
-                    {truncateText(entry.summary || entry.content, 150)}
-                  </p>
-                  <div className="flex flex-col gap-2">
-                    {entry.tags && entry.tags.length > 0 && (
-                      <div className="flex flex-wrap gap-1">
-                        {entry.tags.slice(0, 3).map((tag) => (
-                          <Badge key={tag} variant="secondary" className="text-xs">
-                            {tag}
-                          </Badge>
-                        ))}
-                      </div>
-                    )}
-                    <div className="flex items-center justify-between text-xs text-muted-foreground">
-                      <span>{formatDate(entry.created_at)}</span>
-                      {entry.view_count !== null && entry.view_count > 0 && (
-                        <div className="flex items-center gap-1">
-                          <Eye className="h-3 w-3" />
-                          <span>{entry.view_count}</span>
-                        </div>
-                      )}
-                    </div>
-                    <Button variant="outline" size="sm" className="w-full" asChild>
-                      <Link to={`/knowledge/${entry.id}`}>
-                        <Eye className="mr-1 h-3 w-3" />
-                        View Article
-                      </Link>
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            ))}
+          <div className={fileViewMode === "grid" ? "grid gap-4 sm:grid-cols-2 lg:grid-cols-3" : "space-y-3"}>
+            {visibleFiles.map(renderFileCard)}
           </div>
         )}
-      </div>
+      </section>
+
+      <Dialog open={activeDialog === "createFolder" || activeDialog === "editFolder"} onOpenChange={(open) => setActiveDialog(open ? activeDialog : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{activeDialog === "editFolder" ? "Edit Folder" : "Create Folder"}</DialogTitle>
+            <DialogDescription>Folders organize files at the Knowledge Base root.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <Label htmlFor="folder-name">Name</Label>
+              <Input id="folder-name" value={folderName} onChange={(event) => setFolderName(event.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="folder-color">Color</Label>
+              <Input id="folder-color" type="color" value={folderColor} onChange={(event) => setFolderColor(event.target.value)} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActiveDialog(null)}>Cancel</Button>
+            <Button
+              disabled={!folderName.trim() || createFolderMutation.isPending || updateFolderMutation.isPending}
+              onClick={() => {
+                if (activeDialog === "editFolder" && selectedFolder) {
+                  updateFolderMutation.mutate({ folderId: selectedFolder.id });
+                } else {
+                  createFolderMutation.mutate();
+                }
+              }}
+            >
+              Save
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={activeDialog === "upload"} onOpenChange={(open) => setActiveDialog(open ? "upload" : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Upload Files</DialogTitle>
+            <DialogDescription>
+              Upload up to 20 files into {currentFolderName}. Files will be stored in{" "}
+              {STORAGE_PROVIDER_LABELS[activeStorageQuery.data?.storageType ?? "local"]}.
+            </DialogDescription>
+          </DialogHeader>
+          <ActiveStorageIndicator compact />
+          <Input ref={fileInputRef} type="file" multiple onChange={(event) => handleFileSelection(event.target.files)} />
+          {selectedFiles.length > 0 && (
+            <div className="max-h-48 space-y-2 overflow-y-auto rounded-md border p-2">
+              {selectedFiles.map((file) => (
+                <div key={`${file.name}-${file.lastModified}`} className="flex items-center justify-between text-sm">
+                  <span className="truncate">{file.name}</span>
+                  <span className="text-muted-foreground">{Math.round(file.size / 1024)} KB</span>
+                </div>
+              ))}
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActiveDialog(null)}>Cancel</Button>
+            <Button disabled={uploadMutation.isPending} onClick={submitUpload}>Upload</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={activeDialog === "duplicates"} onOpenChange={(open) => setActiveDialog(open ? "duplicates" : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Duplicate files found</DialogTitle>
+            <DialogDescription>Choose how to resolve files with names that already exist in this folder.</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-2">
+            {duplicates.map((duplicate) => (
+              <div key={duplicate.selectedFile.name} className="rounded-md border p-3 text-sm">
+                {duplicate.selectedFile.name}
+              </div>
+            ))}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => resolveDuplicates("skip")}>Skip</Button>
+            <Button variant="outline" onClick={() => resolveDuplicates("version")}>Keep Versions</Button>
+            <Button onClick={() => resolveDuplicates("overwrite")}>Overwrite</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={activeDialog === "renameFile"} onOpenChange={(open) => setActiveDialog(open ? "renameFile" : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Rename File</DialogTitle>
+            <DialogDescription>Change the display name while keeping the stable file ID.</DialogDescription>
+          </DialogHeader>
+          <Input value={renameValue} onChange={(event) => setRenameValue(event.target.value)} />
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActiveDialog(null)}>Cancel</Button>
+            <Button
+              disabled={!renameValue.trim() || updateFileMutation.isPending}
+              onClick={() => selectedFile && updateFileMutation.mutate({ fileId: selectedFile.id, input: { name: renameValue } })}
+            >
+              Rename
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={activeDialog === "moveFile"} onOpenChange={(open) => setActiveDialog(open ? "moveFile" : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Move File</DialogTitle>
+            <DialogDescription>Select a target folder or move the file back to root.</DialogDescription>
+          </DialogHeader>
+          <Select value={moveFolderId} onValueChange={setMoveFolderId}>
+            <SelectTrigger>
+              <SelectValue placeholder="Target folder" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="root">Root</SelectItem>
+              {folders.map((folder) => (
+                <SelectItem key={folder.id} value={folder.id}>{folder.name}</SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setActiveDialog(null)}>Cancel</Button>
+            <Button
+              disabled={updateFileMutation.isPending}
+              onClick={() => selectedFile && updateFileMutation.mutate({
+                fileId: selectedFile.id,
+                input: { folderId: moveFolderId === "root" ? null : moveFolderId },
+              })}
+            >
+              Move
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ManageAccessModal
+        open={manageAccessTarget !== null}
+        onOpenChange={(open) => !open && setManageAccessTarget(null)}
+        resourceName={manageAccessTarget?.name ?? ""}
+        ownerId={manageAccessTarget?.ownerId ?? user?.id ?? ""}
+        sharedWith={manageAccessTarget?.sharedWith ?? []}
+        isSaving={saveAccessMutation.isPending}
+        onSave={async (sharedWith) => {
+          if (!manageAccessTarget) {
+            return;
+          }
+          await saveAccessMutation.mutateAsync({ target: manageAccessTarget, sharedWith });
+        }}
+      />
+
+      <Dialog open={activeDialog === "shortcuts"} onOpenChange={(open) => setActiveDialog(open ? "shortcuts" : null)}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Keyboard Shortcuts</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-3 text-sm">
+            <Shortcut keys="Ctrl+N" label="Create folder" />
+            <Shortcut keys="Ctrl+U" label="Upload files" />
+            <Shortcut keys="Ctrl+F" label="Focus search" />
+            <Shortcut keys="Shift+?" label="Show shortcuts" />
+            <Shortcut keys="Escape" label="Close dialogs" />
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}
+
+function Shortcut({ keys, label }: { keys: string; label: string }): JSX.Element {
+  return (
+    <div className="flex items-center justify-between rounded-md border p-3">
+      <span>{label}</span>
+      <kbd className="rounded bg-muted px-2 py-1 text-xs">{keys}</kbd>
     </div>
   );
 }

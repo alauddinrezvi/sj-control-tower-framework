@@ -506,6 +506,11 @@ export const adminNavigation: NavGroup[] = [
         ],
       },
       {
+        title: "Storage",
+        href: "/admin/storage",
+        icon: "HardDrive",
+      },
+      {
         title: "Integrations",
         href: "/admin/integrations",
         icon: "Zap",

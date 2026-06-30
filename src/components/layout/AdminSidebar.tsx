@@ -66,6 +66,7 @@ import {
   FolderKanban,
   ListChecks,
   HeartPulse,
+  HardDrive,
   type LucideIcon,
 } from "lucide-react";
 
@@ -106,6 +107,7 @@ const iconMap: Record<string, LucideIcon> = {
   FolderKanban,
   ListChecks,
   HeartPulse,
+  HardDrive,
 };
 
 function resolveIcon(name: string): LucideIcon {
