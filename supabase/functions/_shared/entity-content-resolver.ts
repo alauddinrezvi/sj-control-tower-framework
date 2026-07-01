@@ -155,6 +155,48 @@ export async function resolveEntityContent(
       }
     }
 
+    case 'knowledge_base_file': {
+      const { data } = await supabase
+        .from('files')
+        .select('id, name, storage_path, path, user_id, mime_type, storage_type')
+        .eq('id', entity_id)
+        .maybeSingle()
+      if (!data) return null
+
+      const objectPath = data.storage_path ?? data.path
+      if (!objectPath) return null
+
+      const parsedMarkdown = await getParsedMarkdown(supabase, 'knowledge_base_file', entity_id)
+      if (parsedMarkdown) {
+        return {
+          content: parsedMarkdown,
+          metadata: { file_name: data.name, source: 'parsed_documents' },
+          user_id: data.user_id,
+        }
+      }
+
+      const bucket = data.storage_type === 'local' || data.storage_type === 'supabase'
+        ? 'knowledgebase'
+        : 'knowledgebase'
+
+      const { data: fileData } = await supabase.storage.from(bucket).download(objectPath)
+      if (!fileData) return null
+
+      const mimeType = (data.mime_type ?? '').toLowerCase()
+      let content = ''
+      if (mimeType.startsWith('text/') || mimeType.includes('json') || mimeType.includes('markdown')) {
+        content = await fileData.text()
+      } else {
+        content = `[Binary file: ${data.name}]`
+      }
+
+      return {
+        content: `# ${data.name}\n\n${content}`,
+        metadata: { file_name: data.name },
+        user_id: data.user_id,
+      }
+    }
+
     default:
       return null
   }
