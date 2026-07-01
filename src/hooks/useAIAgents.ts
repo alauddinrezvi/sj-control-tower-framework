@@ -4,6 +4,42 @@ import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
 import { queryKeys, invalidateKeys } from "@/lib/cache";
 import { syncAgentMcpServers } from "@/lib/agent-mcp-sync";
+import { syncAgentKnowledgeFiles } from "@/modules/knowledge/api/file";
+import { slugify } from "@/lib/slug";
+
+async function generateUniqueAgentSlug(
+  preferred: string,
+  excludeAgentId?: string,
+): Promise<string> {
+  const base = slugify(preferred) || "agent";
+  let slug = base;
+  let attempt = 0;
+
+  while (attempt < 20) {
+    let query = supabase.from("ai_agents").select("id").eq("slug", slug);
+    if (excludeAgentId) {
+      query = query.neq("id", excludeAgentId);
+    }
+
+    const { data } = await query.maybeSingle();
+    if (!data) {
+      return slug;
+    }
+
+    attempt += 1;
+    slug = `${base}-${attempt}`;
+  }
+
+  return `${base}-${crypto.randomUUID().slice(0, 8)}`;
+}
+
+function formatAgentCreateError(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error && error.code === "23505") {
+    return "An agent with this slug already exists. Try a different name or slug.";
+  }
+
+  return error instanceof Error ? error.message : "Failed to create agent";
+}
 
 export interface AIAgent {
   id: string;
@@ -78,6 +114,7 @@ export interface AgentFormData {
   tools_config?: unknown[];
   rag_enabled: boolean;
   graphify_enabled?: boolean;
+  attached_knowledge_files?: string[];
 }
 
 // Fetch all agents
@@ -150,7 +187,7 @@ export function useCreateAgent() {
 
   return useMutation({
     mutationFn: async (data: AgentFormData) => {
-      const slug = data.slug || data.name.toLowerCase().replace(/\s+/g, "-");
+      const slug = await generateUniqueAgentSlug(data.slug?.trim() || data.name);
       const mcpServerIds = data.mcp_server_ids || [];
       const mcpEnabled = mcpServerIds.length > 0 || (data.tool_mcp ?? false);
 
@@ -190,6 +227,19 @@ export function useCreateAgent() {
         mcpEnabled
       );
 
+      if (data.attached_knowledge_files && data.attached_knowledge_files.length > 0) {
+        try {
+          await syncAgentKnowledgeFiles(agent.id, data.attached_knowledge_files);
+        } catch (syncError) {
+          console.error("Failed to link knowledge files to agent:", syncError);
+          toast.warning(
+            syncError instanceof Error
+              ? syncError.message
+              : "Agent created but knowledge files could not be linked.",
+          );
+        }
+      }
+
       return agent as unknown as AIAgent;
     },
     onSuccess: () => {
@@ -198,7 +248,7 @@ export function useCreateAgent() {
     },
     onError: (error: unknown) => {
       console.error("Error creating agent:", error);
-      toast.error((error as Error).message || "Failed to create agent");
+      toast.error(formatAgentCreateError(error));
     },
   });
 }
@@ -216,7 +266,12 @@ export function useUpdateAgent() {
       // Only include fields that are provided
       if (data.name !== undefined) {
         updateData.name = data.name;
-        updateData.slug = data.slug || data.name.toLowerCase().replace(/\s+/g, "-");
+      }
+      if (data.slug !== undefined || data.name !== undefined) {
+        const preferred = data.slug?.trim() || data.name;
+        if (preferred) {
+          updateData.slug = await generateUniqueAgentSlug(preferred, id);
+        }
       }
       if (data.description !== undefined) updateData.description = data.description || null;
       if (data.category !== undefined) updateData.category = data.category;

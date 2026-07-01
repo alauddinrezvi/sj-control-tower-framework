@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { supabase } from "@/integrations/supabase/client";
+import {
+  MAX_FILE_SIZE_BYTES,
+  MAX_UPLOAD_FILES,
+  type EmbeddingStatus,
+} from "../constants";
 
 export type KnowledgeFileType =
   | "document"
@@ -58,6 +63,7 @@ export interface KnowledgeFile {
   ownerName?: string;
   ownerEmail?: string;
   ownerAvatar?: string;
+  embeddingStatus?: EmbeddingStatus;
 }
 
 export interface CreateFolderInput {
@@ -88,6 +94,26 @@ export interface ListFilesOptions {
   type?: KnowledgeFileType | string;
   page?: number;
   limit?: number;
+}
+
+export interface UploadFileOptions {
+  isPublic?: boolean;
+  isShared?: boolean;
+  indexForSearch?: boolean;
+  onProgress?: (completed: number, total: number, fileName: string) => void;
+}
+
+export interface FileStatistics {
+  totalFiles: number;
+  totalSizeBytes: number;
+  starredCount: number;
+  sharedCount: number;
+  byType: Record<string, number>;
+}
+
+export interface UploadValidationResult {
+  valid: boolean;
+  error?: string;
 }
 
 export interface PaginatedResponse<TItem> {
@@ -138,6 +164,14 @@ interface KnowledgeFileRow {
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
+  embedding_status?: string | null;
+}
+
+interface ProfileRow {
+  id: string;
+  full_name: string | null;
+  email: string | null;
+  avatar_url: string | null;
 }
 
 interface KnowledgeDatabase {
@@ -224,6 +258,19 @@ function mapFolder(row: KnowledgeFolderRow): KnowledgeFolder {
   };
 }
 
+function parseEmbeddingStatus(value: string | null | undefined): EmbeddingStatus {
+  if (
+    value === "pending" ||
+    value === "processing" ||
+    value === "completed" ||
+    value === "failed"
+  ) {
+    return value;
+  }
+
+  return "none";
+}
+
 function mapFile(row: KnowledgeFileRow): KnowledgeFile {
   return {
     id: row.id,
@@ -242,7 +289,83 @@ function mapFile(row: KnowledgeFileRow): KnowledgeFile {
     path: row.path,
     mimeType: row.mime_type,
     userId: row.user_id,
+    embeddingStatus: parseEmbeddingStatus(row.embedding_status),
   };
+}
+
+async function fetchOwnerProfiles(ownerIds: string[]): Promise<Map<string, ProfileRow>> {
+  const uniqueIds = [...new Set(ownerIds.filter(Boolean))];
+  if (uniqueIds.length === 0) {
+    return new Map();
+  }
+
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("id, full_name, email, avatar_url")
+    .in("id", uniqueIds);
+
+  if (error) {
+    console.warn("Failed to load owner profiles:", error.message);
+    return new Map();
+  }
+
+  return new Map((data ?? []).map((profile) => [profile.id, profile as ProfileRow]));
+}
+
+function applyOwnerDetails<TItem extends KnowledgeFolder | KnowledgeFile>(
+  item: TItem,
+  profiles: Map<string, ProfileRow>,
+): TItem {
+  if (!item.userId) {
+    return item;
+  }
+
+  const profile = profiles.get(item.userId);
+  if (!profile) {
+    return item;
+  }
+
+  return {
+    ...item,
+    ownerName: profile.full_name ?? undefined,
+    ownerEmail: profile.email ?? undefined,
+    ownerAvatar: profile.avatar_url ?? undefined,
+  };
+}
+
+async function enrichWithOwnerDetails<TItem extends KnowledgeFolder | KnowledgeFile>(
+  items: TItem[],
+): Promise<TItem[]> {
+  const profiles = await fetchOwnerProfiles(items.map((item) => item.userId ?? ""));
+  return items.map((item) => applyOwnerDetails(item, profiles));
+}
+
+export function validateUploadFiles(files: File[]): UploadValidationResult {
+  if (files.length === 0) {
+    return { valid: false, error: "No files selected" };
+  }
+
+  if (files.length > MAX_UPLOAD_FILES) {
+    return { valid: false, error: `Maximum ${MAX_UPLOAD_FILES} files per upload` };
+  }
+
+  for (const file of files) {
+    if (file.size > MAX_FILE_SIZE_BYTES) {
+      return { valid: false, error: `"${file.name}" exceeds the 50 MB size limit` };
+    }
+  }
+
+  return { valid: true };
+}
+
+async function cleanupEmbeddingsForFile(fileId: string): Promise<void> {
+  const { error } = await supabase.rpc("cleanup_knowledge_base_file_embeddings", {
+    target_file_id: fileId,
+  });
+
+  if (error) {
+    console.warn("Failed to cleanup embeddings:", error.message);
+  }
 }
 
 function getFileType(file: File): KnowledgeFileType {
@@ -291,11 +414,14 @@ async function getActiveStorageType(): Promise<KnowledgeStorageType> {
 async function uploadFilesLocally(
   files: File[],
   folderId?: string | null,
+  options: UploadFileOptions = {},
 ): Promise<KnowledgeFile[]> {
   const userId = await getCurrentUserId();
   const uploadedFiles: KnowledgeFile[] = [];
+  const total = files.length;
 
-  for (const file of files) {
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
     const fileId = crypto.randomUUID();
     const storagePath = `${userId}/${fileId}${safeStorageName(file.name)}`;
 
@@ -323,6 +449,9 @@ async function uploadFilesLocally(
         url: publicUrlData.publicUrl,
         storage_type: "local",
         storage_path: storagePath,
+        is_public: options.isPublic ?? false,
+        is_shared: options.isShared ?? false,
+        embedding_status: options.indexForSearch ? "pending" : "none",
         metadata: { originalName: file.name },
       })
       .select()
@@ -334,9 +463,39 @@ async function uploadFilesLocally(
     }
 
     uploadedFiles.push(mapFile(data));
+    options.onProgress?.(index + 1, total, file.name);
   }
 
   return uploadedFiles;
+}
+
+async function uploadSingleFileViaEdge(
+  file: File,
+  folderId: string | null | undefined,
+  options: UploadFileOptions,
+): Promise<KnowledgeFile> {
+  const formData = new FormData();
+  formData.append("action", "upload");
+  formData.append("files", file);
+  formData.append("folder_id", folderId ?? "null");
+  formData.append("is_public", String(options.isPublic ?? false));
+  formData.append("is_shared", String(options.isShared ?? false));
+  formData.append("index_for_search", String(options.indexForSearch ?? false));
+
+  const { data, error } = await supabase.functions.invoke("knowledge-file-storage", {
+    body: formData,
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const result = data as KnowledgeFileStorageResponse;
+  if (!result.success || !result.data?.[0]) {
+    throw new Error(result.message ?? `Failed to upload ${file.name}`);
+  }
+
+  return mapFile(result.data[0]);
 }
 
 async function getCurrentUserId(): Promise<string> {
@@ -432,9 +591,11 @@ export async function listFolders(): Promise<KnowledgeFolder[]> {
     throw error;
   }
 
-  return (data ?? [])
-    .filter((row) => !hidden.folders.has(row.id))
-    .map(mapFolder);
+  return enrichWithOwnerDetails(
+    (data ?? [])
+      .filter((row) => !hidden.folders.has(row.id))
+      .map(mapFolder),
+  );
 }
 
 export async function updateFolder(id: string, input: UpdateFolderInput): Promise<KnowledgeFolder> {
@@ -471,52 +632,50 @@ export async function deleteFolder(id: string): Promise<void> {
   }
 }
 
-export async function uploadFiles(files: File[], folderId?: string | null): Promise<KnowledgeFile[]> {
+export async function uploadFiles(
+  files: File[],
+  folderId?: string | null,
+  options: UploadFileOptions = {},
+): Promise<KnowledgeFile[]> {
+  const validation = validateUploadFiles(files);
+  if (!validation.valid) {
+    throw new Error(validation.error ?? "Invalid upload");
+  }
+
   const activeStorageType = await getActiveStorageType();
+  const uploadedFiles: KnowledgeFile[] = [];
+  const total = files.length;
 
-  if (activeStorageType === "local") {
-    try {
-      const formData = new FormData();
-      formData.append("action", "upload");
-      files.forEach((file) => formData.append("files", file));
-      formData.append("folder_id", folderId ?? "null");
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index];
 
-      const { data, error } = await supabase.functions.invoke("knowledge-file-storage", {
-        body: formData,
-      });
-
-      if (!error) {
-        const result = data as KnowledgeFileStorageResponse;
-        if (result.success && result.data) {
-          return result.data.map(mapFile);
-        }
+    if (activeStorageType === "local") {
+      try {
+        const uploaded = await uploadSingleFileViaEdge(file, folderId, options);
+        uploadedFiles.push(uploaded);
+        options.onProgress?.(index + 1, total, file.name);
+        continue;
+      } catch {
+        const [uploaded] = await uploadFilesLocally([file], folderId, {
+          ...options,
+          onProgress: undefined,
+        });
+        uploadedFiles.push(uploaded);
+        options.onProgress?.(index + 1, total, file.name);
+        continue;
       }
-    } catch {
-      // Fall back to direct local upload when the edge function is unavailable.
     }
 
-    return uploadFilesLocally(files, folderId);
+    const uploaded = await uploadSingleFileViaEdge(file, folderId, options);
+    uploadedFiles.push(uploaded);
+    options.onProgress?.(index + 1, total, file.name);
   }
 
-  const formData = new FormData();
-  formData.append("action", "upload");
-  files.forEach((file) => formData.append("files", file));
-  formData.append("folder_id", folderId ?? "null");
-
-  const { data, error } = await supabase.functions.invoke("knowledge-file-storage", {
-    body: formData,
-  });
-
-  if (error) {
-    throw error;
+  if (options.indexForSearch) {
+    await indexFilesForSearch(uploadedFiles.map((entry) => entry.id));
   }
 
-  const result = data as KnowledgeFileStorageResponse;
-  if (!result.success || !result.data) {
-    throw new Error(result.message ?? "Failed to upload files");
-  }
-
-  return result.data.map(mapFile);
+  return uploadedFiles;
 }
 
 export async function listFiles(options: ListFilesOptions = {}): Promise<PaginatedResponse<KnowledgeFile>> {
@@ -555,14 +714,15 @@ export async function listFiles(options: ListFilesOptions = {}): Promise<Paginat
   const hidden = await getHiddenResourceIds();
   const total = count ?? 0;
   const visibleData = (data ?? []).filter((row) => !hidden.files.has(row.id));
+  const mappedFiles = await enrichWithOwnerDetails(visibleData.map(mapFile));
 
   return {
-    data: visibleData.map(mapFile),
+    data: mappedFiles,
     pagination: {
       page,
       limit,
-      total: visibleData.length,
-      totalPages: Math.max(1, Math.ceil(visibleData.length / limit)),
+      total,
+      totalPages: Math.max(1, Math.ceil(total / limit)),
     },
   };
 }
@@ -615,6 +775,8 @@ export async function deleteFile(id: string): Promise<void> {
     if (objectPath) {
       await knowledgeSupabase.storage.from(LOCAL_STORAGE_BUCKET).remove([objectPath]);
     }
+
+    await cleanupEmbeddingsForFile(id);
     return;
   }
 
@@ -630,6 +792,8 @@ export async function deleteFile(id: string): Promise<void> {
   if (!result.success) {
     throw new Error(result.message ?? "Failed to delete file");
   }
+
+  await cleanupEmbeddingsForFile(id);
 }
 
 export async function downloadFile(file: KnowledgeFile): Promise<void> {
@@ -652,4 +816,215 @@ export async function downloadFile(file: KnowledgeFile): Promise<void> {
   }
 
   window.open(result.data.url, "_blank", "noopener,noreferrer");
+}
+
+export async function getFilePreviewUrl(file: KnowledgeFile): Promise<string> {
+  if (file.storageType === "local" && file.url) {
+    return file.url;
+  }
+
+  const { data, error } = await supabase.functions.invoke("knowledge-file-storage", {
+    body: { action: "download-url", fileId: file.id },
+  });
+
+  if (error) {
+    throw error;
+  }
+
+  const result = data as KnowledgeDownloadUrlResponse;
+  if (!result.success || !result.data?.url) {
+    throw new Error(result.message ?? "Failed to get preview URL");
+  }
+
+  return result.data.url;
+}
+
+export async function getFileStatistics(): Promise<FileStatistics> {
+  const hidden = await getHiddenResourceIds();
+  const { data, error } = await knowledgeSupabase
+    .from("files")
+    .select("size, type, is_starred, is_shared, shared_with")
+    .is("deleted_at", null);
+
+  if (error) {
+    throw error;
+  }
+
+  const visibleRows = (data ?? []).filter((row) => !hidden.files.has(row.id));
+  const byType: Record<string, number> = {};
+
+  let totalSizeBytes = 0;
+  let starredCount = 0;
+  let sharedCount = 0;
+
+  for (const row of visibleRows) {
+    totalSizeBytes += row.size;
+    if (row.is_starred) {
+      starredCount += 1;
+    }
+    if (row.is_shared || (Array.isArray(row.shared_with) && row.shared_with.length > 0)) {
+      sharedCount += 1;
+    }
+    byType[row.type] = (byType[row.type] ?? 0) + 1;
+  }
+
+  return {
+    totalFiles: visibleRows.length,
+    totalSizeBytes,
+    starredCount,
+    sharedCount,
+    byType,
+  };
+}
+
+export async function bulkDeleteFiles(fileIds: string[]): Promise<void> {
+  for (const fileId of fileIds) {
+    await deleteFile(fileId);
+  }
+}
+
+export async function bulkUpdateFileVisibility(
+  fileIds: string[],
+  updates: { isPublic?: boolean; isShared?: boolean },
+): Promise<void> {
+  if (fileIds.length === 0) {
+    return;
+  }
+
+  const updateData: Partial<KnowledgeFileRow> = {};
+  if (updates.isPublic !== undefined) {
+    updateData.is_public = updates.isPublic;
+  }
+  if (updates.isShared !== undefined) {
+    updateData.is_shared = updates.isShared;
+  }
+
+  const { error } = await knowledgeSupabase.from("files").update(updateData).in("id", fileIds);
+  if (error) {
+    throw error;
+  }
+}
+
+export async function indexFilesForSearch(fileIds: string[]): Promise<void> {
+  if (fileIds.length === 0) {
+    return;
+  }
+
+  const { error: statusError } = await knowledgeSupabase
+    .from("files")
+    .update({ embedding_status: "pending" })
+    .in("id", fileIds);
+
+  if (statusError) {
+    console.warn("Failed to update embedding status:", statusError.message);
+  }
+
+  const queueItems = fileIds.map((fileId) => ({
+    entity_type: "knowledge_base_file",
+    entity_id: fileId,
+    priority: 1,
+    status: "pending",
+  }));
+
+  const { error: queueError } = await supabase.from("embedding_queue").insert(queueItems);
+  if (queueError) {
+    console.warn("Failed to queue embeddings:", queueError.message);
+  }
+
+  await supabase.functions
+    .invoke("process-embedding-queue", { body: { batch_size: Math.min(fileIds.length, 10) } })
+    .catch(() => undefined);
+}
+
+export async function listSelectableKnowledgeFiles(): Promise<KnowledgeFile[]> {
+  const response = await listFiles({ limit: 500 });
+  return response.data;
+}
+
+function isAgentKnowledgeFilesTableMissing(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const code = "code" in error ? String(error.code) : "";
+  const message = "message" in error ? String(error.message) : "";
+
+  return (
+    code === "PGRST205" ||
+    code === "42P01" ||
+    message.includes("agent_knowledge_files")
+  );
+}
+
+export function getAgentKnowledgeFilesSetupError(): string {
+  return (
+    "The agent_knowledge_files table is not deployed. Run " +
+    "supabase/migrations/RUN_IF_agent_knowledge_files_MISSING.sql in the Supabase SQL Editor, " +
+    "then retry."
+  );
+}
+
+export async function listAgentKnowledgeFileIds(agentId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("agent_knowledge_files")
+    .select("file_id")
+    .eq("agent_id", agentId);
+
+  if (error) {
+    if (isAgentKnowledgeFilesTableMissing(error)) {
+      throw new Error(getAgentKnowledgeFilesSetupError());
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => row.file_id as string);
+}
+
+export async function syncAgentKnowledgeFiles(agentId: string, fileIds: string[]): Promise<void> {
+  const userId = await getCurrentUserId();
+
+  const { data: existing, error: existingError } = await supabase
+    .from("agent_knowledge_files")
+    .select("file_id")
+    .eq("agent_id", agentId);
+
+  if (existingError) {
+    if (isAgentKnowledgeFilesTableMissing(existingError)) {
+      throw new Error(getAgentKnowledgeFilesSetupError());
+    }
+    throw existingError;
+  }
+
+  const existingIds = new Set((existing ?? []).map((row) => row.file_id as string));
+  const targetIds = new Set(fileIds);
+  const toAdd = fileIds.filter((fileId) => !existingIds.has(fileId));
+  const toRemove = [...existingIds].filter((fileId) => !targetIds.has(fileId));
+
+  if (toRemove.length > 0) {
+    const { error } = await supabase
+      .from("agent_knowledge_files")
+      .delete()
+      .eq("agent_id", agentId)
+      .in("file_id", toRemove);
+
+    if (error) {
+      throw error;
+    }
+  }
+
+  if (toAdd.length > 0) {
+    const { error } = await supabase.from("agent_knowledge_files").insert(
+      toAdd.map((fileId) => ({
+        agent_id: agentId,
+        file_id: fileId,
+        added_by: userId,
+      })),
+    );
+
+    if (error) {
+      throw error;
+    }
+
+    await indexFilesForSearch(toAdd);
+  }
 }

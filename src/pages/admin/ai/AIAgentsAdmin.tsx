@@ -84,6 +84,7 @@ import {
   getDefaultToolConfig,
   type ToolConfig,
 } from "@/components/ai/AgentToolConfig";
+import { AgentKnowledgeFilePicker } from "@/modules/knowledge/components/AgentKnowledgeFilePicker";
 
 type StatusFilter = "all" | AgentHealthStatus;
 
@@ -162,6 +163,7 @@ export default function AIAgentsAdmin() {
     memory_enabled: false,
     rag_enabled: false,
     graphify_enabled: false,
+    attached_knowledge_files: [],
     ...getDefaultToolConfig(),
   });
 
@@ -208,6 +210,7 @@ export default function AIAgentsAdmin() {
       memory_enabled: false,
       rag_enabled: false,
       graphify_enabled: false,
+      attached_knowledge_files: [],
       ...getDefaultToolConfig(),
     });
   };
@@ -344,7 +347,12 @@ export default function AIAgentsAdmin() {
                       id="slug"
                       value={formData.slug}
                       onChange={(e) => setFormData({ ...formData, slug: e.target.value })}
+                      placeholder="Auto-generated from name if left blank"
                     />
+                    <p className="text-xs text-muted-foreground">
+                      Used in URLs. If this slug is taken, a suffix like <code>-1</code> is added
+                      automatically.
+                    </p>
                   </div>
                 </div>
                 <div className="space-y-2">
@@ -456,6 +464,15 @@ export default function AIAgentsAdmin() {
                     tools_config: formData.tools_config ?? [],
                   }}
                   onChange={handleToolConfigChange}
+                  disabled={createAgent.isPending}
+                />
+                <AgentKnowledgeFilePicker
+                  selectedFileIds={formData.attached_knowledge_files ?? []}
+                  onChange={(fileIds) =>
+                    setFormData((prev) => ({ ...prev, attached_knowledge_files: fileIds }))
+                  }
+                  fileSearchEnabled={Boolean(formData.tool_file_search || formData.rag_enabled)}
+                  codeInterpreterEnabled={Boolean(formData.tool_code_interpreter)}
                   disabled={createAgent.isPending}
                 />
                 <div className="flex justify-end gap-2">

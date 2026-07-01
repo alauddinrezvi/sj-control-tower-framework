@@ -15,6 +15,8 @@ import {
 import { Slider } from "@/components/ui/slider";
 import { Save, Loader2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
+import { KnowledgeFilePicker } from "@/modules/knowledge/components/KnowledgeFilePicker";
+import { syncAgentKnowledgeFiles } from "@/modules/knowledge/api/file";
 
 interface AgentPersonalization {
   is_enabled: boolean;
@@ -63,15 +65,16 @@ export function AgentPersonalizationModal({
     setIsSaving(true);
     try {
       await onSave(personalization);
+      await syncAgentKnowledgeFiles(agentId, personalization.attached_knowledge_files);
       toast({
         title: "Success",
         description: "Agent personalization saved successfully",
       });
       onOpenChange(false);
-    } catch (error: any) {
+    } catch (error: unknown) {
       toast({
         title: "Error",
-        description: error.message || "Failed to save personalization",
+        description: error instanceof Error ? error.message : "Failed to save personalization",
         variant: "destructive",
       });
     } finally {
@@ -124,6 +127,21 @@ export function AgentPersonalizationModal({
             <p className="text-xs text-muted-foreground">
               These instructions will be appended to the agent's system prompt
             </p>
+          </div>
+
+          {/* Attached Knowledge Files */}
+          <div className="space-y-2">
+            <Label>Attached Knowledge Files</Label>
+            <p className="text-sm text-muted-foreground">
+              Select files from your Knowledge Base. New attachments are indexed lazily for RAG.
+            </p>
+            <KnowledgeFilePicker
+              selectedFileIds={personalization.attached_knowledge_files}
+              onChange={(fileIds) =>
+                setPersonalization({ ...personalization, attached_knowledge_files: fileIds })
+              }
+              disabled={!personalization.is_enabled || personalization.use_all_knowledge}
+            />
           </div>
 
           {/* Use All Knowledge */}

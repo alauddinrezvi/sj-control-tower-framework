@@ -507,21 +507,40 @@ export default function StorageSettings(): JSX.Element {
         </CardContent>
       </Card>
 
-      <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-        <p>
-          Switching storage providers only affects new uploads. Existing files remain on their original
-          backend ({PROVIDER_LABELS.local}, {PROVIDER_LABELS.s3}, or {PROVIDER_LABELS.supabase}).
-        </p>
+      <div className="space-y-3">
+        <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <p>
+            Switching storage providers only affects new uploads. Existing files remain on their original
+            backend and appear muted in Knowledge Base until that provider is active again.
+          </p>
+        </div>
+        <div className="flex items-start gap-2 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900">
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+          <div>
+            <p className="font-medium">Operational checklist</p>
+            <p className="mt-1">
+              Apply migrations and deploy edge functions for full KB support:
+            </p>
+            <code className="mt-2 block rounded bg-white/70 px-2 py-1 text-xs">
+              npx supabase db push && npx supabase functions deploy knowledge-file-storage && npx supabase functions deploy storage-settings
+            </code>
+          </div>
+        </div>
       </div>
 
       <AlertDialog open={pendingProvider !== null} onOpenChange={(open) => !open && setPendingProvider(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Switch storage provider?</AlertDialogTitle>
-            <AlertDialogDescription>
-              New files will be saved to {pendingProvider ? PROVIDER_LABELS[pendingProvider] : "the selected provider"}.
-              Existing files will remain on their current storage backend.
+            <AlertDialogDescription className="space-y-2">
+              <span className="block">
+                New files will be saved to {pendingProvider ? PROVIDER_LABELS[pendingProvider] : "the selected provider"}.
+              </span>
+              <span className="block">
+                Files on other backends will stay visible but muted in Knowledge Base — users cannot rename,
+                move, or delete them until the matching provider is active.
+              </span>
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

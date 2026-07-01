@@ -11,6 +11,9 @@ import {
   uploadToActiveStorage,
 } from "../_shared/storage-operations.ts";
 
+const MAX_UPLOAD_FILES = 20;
+const MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024;
+
 type KnowledgeFileType = "document" | "image" | "audio" | "video" | "archive" | "code" | "other";
 
 interface KnowledgeFileActionBody {
@@ -100,6 +103,10 @@ Deno.serve(async (req) => {
           throw error;
         }
 
+        await supabase.rpc("cleanup_knowledge_base_file_embeddings", {
+          target_file_id: body.fileId,
+        }).catch(() => undefined);
+
         return jsonResponse({ success: true });
       }
 
@@ -145,9 +152,22 @@ Deno.serve(async (req) => {
 
     const folderId = formData.get("folder_id");
     const files = formData.getAll("files").filter((entry): entry is File => entry instanceof File);
+    const isPublic = formData.get("is_public") === "true";
+    const isShared = formData.get("is_shared") === "true";
+    const indexForSearch = formData.get("index_for_search") === "true";
 
     if (files.length === 0) {
       return jsonResponse({ success: false, message: "No files provided" }, 400);
+    }
+
+    if (files.length > MAX_UPLOAD_FILES) {
+      return jsonResponse({ success: false, message: `Maximum ${MAX_UPLOAD_FILES} files per upload` }, 400);
+    }
+
+    for (const file of files) {
+      if (file.size > MAX_FILE_SIZE_BYTES) {
+        return jsonResponse({ success: false, message: `"${file.name}" exceeds the 50 MB size limit` }, 400);
+      }
     }
 
     const config = await getStorageConfig(supabase);
@@ -182,6 +202,9 @@ Deno.serve(async (req) => {
           s3_key: uploadResult.s3Key,
           storage_path: uploadResult.storagePath,
           storage_type: uploadResult.storageType,
+          is_public: isPublic,
+          is_shared: isShared,
+          embedding_status: indexForSearch ? "pending" : "none",
           metadata: { originalName: file.name },
         })
         .select("*")
