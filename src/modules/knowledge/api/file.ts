@@ -941,6 +941,45 @@ export async function listSelectableKnowledgeFiles(): Promise<KnowledgeFile[]> {
   return response.data;
 }
 
+function isAgentKnowledgeFilesTableMissing(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const code = "code" in error ? String(error.code) : "";
+  const message = "message" in error ? String(error.message) : "";
+
+  return (
+    code === "PGRST205" ||
+    code === "42P01" ||
+    message.includes("agent_knowledge_files")
+  );
+}
+
+export function getAgentKnowledgeFilesSetupError(): string {
+  return (
+    "The agent_knowledge_files table is not deployed. Run " +
+    "supabase/migrations/RUN_IF_agent_knowledge_files_MISSING.sql in the Supabase SQL Editor, " +
+    "then retry."
+  );
+}
+
+export async function listAgentKnowledgeFileIds(agentId: string): Promise<string[]> {
+  const { data, error } = await supabase
+    .from("agent_knowledge_files")
+    .select("file_id")
+    .eq("agent_id", agentId);
+
+  if (error) {
+    if (isAgentKnowledgeFilesTableMissing(error)) {
+      throw new Error(getAgentKnowledgeFilesSetupError());
+    }
+    throw error;
+  }
+
+  return (data ?? []).map((row) => row.file_id as string);
+}
+
 export async function syncAgentKnowledgeFiles(agentId: string, fileIds: string[]): Promise<void> {
   const userId = await getCurrentUserId();
 
@@ -950,6 +989,9 @@ export async function syncAgentKnowledgeFiles(agentId: string, fileIds: string[]
     .eq("agent_id", agentId);
 
   if (existingError) {
+    if (isAgentKnowledgeFilesTableMissing(existingError)) {
+      throw new Error(getAgentKnowledgeFilesSetupError());
+    }
     throw existingError;
   }
 

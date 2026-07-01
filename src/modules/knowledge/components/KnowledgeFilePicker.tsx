@@ -12,21 +12,29 @@ interface KnowledgeFilePickerProps {
   selectedFileIds: string[];
   onChange: (fileIds: string[]) => void;
   disabled?: boolean;
+  files?: KnowledgeFile[];
+  isLoading?: boolean;
+  emptyMessage?: string;
 }
 
 export function KnowledgeFilePicker({
   selectedFileIds,
   onChange,
   disabled = false,
+  files: filesProp,
+  isLoading: isLoadingProp,
+  emptyMessage = "No knowledge files found. Upload files in Knowledge Base first.",
 }: KnowledgeFilePickerProps): JSX.Element {
   const [searchTerm, setSearchTerm] = useState("");
 
   const filesQuery = useQuery({
     queryKey: ["knowledge", "file-picker", "files"],
     queryFn: listSelectableKnowledgeFiles,
+    enabled: filesProp === undefined,
   });
 
-  const files = useMemo(() => filesQuery.data ?? [], [filesQuery.data]);
+  const files = useMemo(() => filesProp ?? filesQuery.data ?? [], [filesProp, filesQuery.data]);
+  const isLoading = isLoadingProp ?? (filesProp === undefined ? filesQuery.isLoading : false);
 
   const filteredFiles = useMemo(
     () => files.filter((file) => file.name.toLowerCase().includes(searchTerm.trim().toLowerCase())),
@@ -97,14 +105,12 @@ export function KnowledgeFilePicker({
         )}
       </div>
 
-      {filesQuery.isLoading ? (
+      {isLoading ? (
         <div className="flex h-32 items-center justify-center">
           <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
         </div>
       ) : filteredFiles.length === 0 ? (
-        <p className="rounded-md border p-4 text-sm text-muted-foreground">
-          No knowledge files found. Upload files in Knowledge Base first.
-        </p>
+        <p className="rounded-md border p-4 text-sm text-muted-foreground">{emptyMessage}</p>
       ) : (
         <ScrollArea className="h-56 rounded-md border p-2">
           <div className="space-y-2">{filteredFiles.map(renderFileRow)}</div>

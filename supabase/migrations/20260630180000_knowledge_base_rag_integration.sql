@@ -10,7 +10,7 @@ WHERE deleted_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS public.agent_knowledge_files (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  agent_id UUID NOT NULL,
+  agent_id UUID NOT NULL REFERENCES public.ai_agents(id) ON DELETE CASCADE,
   file_id UUID NOT NULL REFERENCES public.files(id) ON DELETE CASCADE,
   added_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -32,11 +32,18 @@ TO authenticated
 USING (true);
 
 DROP POLICY IF EXISTS "Users can manage own agent knowledge file links" ON public.agent_knowledge_files;
+DROP POLICY IF EXISTS "Admins manage agent knowledge file links" ON public.agent_knowledge_files;
 CREATE POLICY "Users can manage own agent knowledge file links"
 ON public.agent_knowledge_files FOR ALL
 TO authenticated
-USING (added_by = auth.uid())
-WITH CHECK (added_by = auth.uid());
+USING (
+  added_by = auth.uid()
+  OR public.has_role(auth.uid(), 'admin')
+)
+WITH CHECK (
+  added_by = auth.uid()
+  OR public.has_role(auth.uid(), 'admin')
+);
 
 -- Extend embedding queue to support knowledge base manager files.
 DO $$
