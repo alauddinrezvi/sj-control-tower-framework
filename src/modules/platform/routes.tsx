@@ -19,7 +19,6 @@ import MicrosoftAuthCallback from "@/pages/MicrosoftAuthCallback";
 import TermsAndConditions from "@/pages/TermsAndConditions";
 import PrivacyPolicy from "@/pages/PrivacyPolicy";
 import AcceptInvite from "@/pages/AcceptInvite";
-import Onboarding from "@/pages/Onboarding";
 import NotFound from "@/pages/NotFound";
 
 // Core protected pages (always available)
@@ -60,7 +59,6 @@ export const publicRoutes = (
 export const coreProtectedRoutes = (
   <>
     <Route path="/dashboard" element={<Dashboard />} />
-    <Route path="/onboarding" element={<Onboarding />} />
     <Route path="/profile" element={<Profile />} />
     <Route path="/settings" element={<Settings />} />
     <Route path="/settings/security" element={<AccountSecurity />} />

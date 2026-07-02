@@ -10,6 +10,8 @@ import { Loader2, Brain, Mail } from "lucide-react";
 import { checkSignupDomainAllowed } from "@/hooks/useSignupWhitelist";
 import { EmailValidationIndicator } from "@/components/auth/EmailValidationIndicator";
 import { PasswordStrengthMeter } from "@/components/security/PasswordStrengthMeter";
+import { validateEmailLocally } from "@/lib/email-validator";
+import { validatePasswordLocally } from "@/lib/password-validator";
 
 export default function Signup() {
   const [email, setEmail] = useState("");
@@ -21,8 +23,6 @@ export default function Signup() {
   const [termsAccepted, setTermsAccepted] = useState(false);
   const [privacyAccepted, setPrivacyAccepted] = useState(false);
   const [validationError, setValidationError] = useState("");
-  const [emailValid, setEmailValid] = useState(false);
-  const [passwordValid, setPasswordValid] = useState(false);
   const [awaitingVerification, setAwaitingVerification] = useState<string | null>(null);
   const [resending, setResending] = useState(false);
   const { signUp, signInWithGoogle, resendVerificationEmail } = useAuth();
@@ -33,12 +33,15 @@ export default function Signup() {
     setError("");
     setValidationError("");
 
-    if (!emailValid) {
+    const localEmail = validateEmailLocally(email);
+    const localPassword = validatePasswordLocally(password);
+
+    if (!localEmail.formatValid || localEmail.isDisposable) {
       setError("Please enter a valid email address");
       return;
     }
 
-    if (!passwordValid) {
+    if (!localPassword.valid) {
       setError("Password does not meet security requirements");
       return;
     }
@@ -103,6 +106,8 @@ export default function Signup() {
   };
 
   const passwordsMatch = password.length > 0 && password === confirmPassword;
+  const localEmail = validateEmailLocally(email);
+  const localPassword = validatePasswordLocally(password);
 
   const isFormValid =
     termsAccepted &&
@@ -111,8 +116,9 @@ export default function Signup() {
     email.trim().length > 0 &&
     password.length >= 8 &&
     passwordsMatch &&
-    emailValid &&
-    passwordValid;
+    localEmail.formatValid &&
+    !localEmail.isDisposable &&
+    localPassword.valid;
 
   const handleResendVerification = async () => {
     if (!awaitingVerification) return;
@@ -249,10 +255,7 @@ export default function Signup() {
                   disabled={loading}
                   className="h-10"
                 />
-                <EmailValidationIndicator
-                  email={email}
-                  onValidationChange={(result) => setEmailValid(result.isValid)}
-                />
+                <EmailValidationIndicator email={email} />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="password" className="text-sm font-medium">Password</Label>
@@ -267,10 +270,7 @@ export default function Signup() {
                   minLength={8}
                   className="h-10"
                 />
-                <PasswordStrengthMeter
-                  password={password}
-                  onValidationChange={setPasswordValid}
-                />
+                <PasswordStrengthMeter password={password} />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="confirmPassword" className="text-sm font-medium">Confirm Password</Label>

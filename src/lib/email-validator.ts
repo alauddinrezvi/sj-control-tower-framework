@@ -84,7 +84,7 @@ export async function validateEmailMxRemote(email: string): Promise<Pick<EmailVa
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : "Email verification failed";
-    return { mxValid: false, error: message };
+    return { mxValid: null, error: message };
   }
 }
 
@@ -97,7 +97,7 @@ export function aggregateEmailValidation(
   const formatValid = local.formatValid;
   const isDisposable = local.isDisposable;
 
-  const mxPassed = mxValid === true;
+  const mxPassed = mxValid !== false;
   const isValid = formatValid && !isDisposable && mxPassed && !isPending;
 
   let resolvedError = error;

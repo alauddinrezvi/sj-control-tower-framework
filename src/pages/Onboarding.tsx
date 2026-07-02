@@ -28,6 +28,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { logRbacEvent } from "@/lib/activity-logger";
+import { markUserOnboardingComplete } from "@/hooks/useOnboarding";
 
 const STEPS = [
   { id: 1, title: "Welcome" },
@@ -48,7 +49,7 @@ const TIMEZONES = [
 ];
 
 export default function Onboarding() {
-  const { user, updateProfile } = useAuth();
+  const { user, updateProfile, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const { data: departments } = useDepartments();
   const [step, setStep] = useState(1);
@@ -62,43 +63,74 @@ export default function Onboarding() {
   });
 
   useEffect(() => {
-    if (!user) return;
-    const load = async () => {
-      const { data } = await (supabase as any)
-        .from("onboarding_progress")
-        .select("*")
-        .eq("user_id", user.id)
-        .maybeSingle();
+    if (authLoading) return;
 
-      if (data?.completed_at) {
-        navigate("/dashboard", { replace: true });
-        return;
-      }
-      if (data?.current_step) setStep(data.current_step);
-
-      const { data: prof } = await supabase
-        .from("profiles")
-        .select("full_name, metadata")
-        .eq("id", user.id)
-        .single();
-
-      if (prof) {
-        const meta = (prof.metadata as Record<string, string>) || {};
-        setProfile({
-          full_name: prof.full_name || "",
-          job_title: meta.job_title || "",
-          department_id: meta.department_id || "",
-          timezone: meta.timezone || "UTC",
-        });
-      }
+    if (!user) {
       setLoading(false);
-    };
-    load();
-  }, [user, navigate]);
+      return;
+    }
 
-  const saveProgress = async (nextStep: number, completed = false) => {
+    let cancelled = false;
+
+    const load = async (): Promise<void> => {
+      try {
+        const { data, error } = await (supabase as any)
+          .from("onboarding_progress")
+          .select("*")
+          .eq("user_id", user.id)
+          .maybeSingle();
+
+        if (error) {
+          console.error("Failed to load onboarding progress:", error);
+        }
+
+        if (cancelled) return;
+
+        if (data?.completed_at) {
+          navigate("/dashboard", { replace: true });
+          return;
+        }
+
+        if (data?.current_step) {
+          setStep(data.current_step);
+        }
+
+        const { data: prof } = await supabase
+          .from("profiles")
+          .select("full_name, metadata")
+          .eq("id", user.id)
+          .single();
+
+        if (cancelled) return;
+
+        if (prof) {
+          const meta = (prof.metadata as Record<string, string>) || {};
+          setProfile({
+            full_name: prof.full_name || "",
+            job_title: meta.job_title || "",
+            department_id: meta.department_id || "",
+            timezone: meta.timezone || "UTC",
+          });
+        }
+      } catch (error) {
+        console.error("Failed to initialize onboarding:", error);
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
+    void load();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user, authLoading, navigate]);
+
+  const saveProgress = async (nextStep: number, completed = false): Promise<void> => {
     if (!user) return;
-    await (supabase as any).from("onboarding_progress").upsert(
+    const { error } = await (supabase as any).from("onboarding_progress").upsert(
       {
         user_id: user.id,
         current_step: nextStep,
@@ -108,9 +140,23 @@ export default function Onboarding() {
       },
       { onConflict: "user_id" }
     );
+
+    if (error) {
+      throw error;
+    }
   };
 
-  const handleProfileSave = async () => {
+  const advanceStep = async (nextStep: number): Promise<void> => {
+    try {
+      await saveProgress(nextStep);
+    } catch (error) {
+      console.warn("Failed to save onboarding progress:", error);
+      toast.error("Could not save progress. You can still continue.");
+    }
+    setStep(nextStep);
+  };
+
+  const handleProfileSave = async (): Promise<void> => {
     if (!user || !profile.full_name.trim()) {
       toast.error("Please enter your name");
       return;
@@ -145,20 +191,14 @@ export default function Onboarding() {
     }
   };
 
-  const handleFinish = async () => {
+  const handleFinish = async (): Promise<void> => {
     if (!user) return;
     setSaving(true);
     try {
-      await saveProgress(5, true);
-      await supabase.from("app_config").upsert({
-        key: `user.${user.id}.onboarding_completed`,
-        value: true,
-        category: "user_preferences",
-        description: "User onboarding completion status",
-      });
+      await markUserOnboardingComplete(user.id);
       logRbacEvent("onboarding.completed", { user_id: user.id });
       toast.success("Welcome to Control Tower!");
-      navigate("/dashboard");
+      navigate("/dashboard", { replace: true });
     } catch {
       toast.error("Failed to complete onboarding");
     } finally {
@@ -166,7 +206,7 @@ export default function Onboarding() {
     }
   };
 
-  if (loading) {
+  if (authLoading || loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <Loader2 className="h-8 w-8 animate-spin" />
@@ -177,7 +217,7 @@ export default function Onboarding() {
   const progress = (step / STEPS.length) * 100;
 
   return (
-    <div className="min-h-screen bg-muted/30 flex items-center justify-center p-4">
+    <div className="relative z-10 min-h-screen bg-muted/30 flex items-center justify-center p-4">
       <Card className="w-full max-w-2xl">
         <CardHeader>
           <div className="flex items-center justify-between mb-2">
@@ -219,7 +259,7 @@ export default function Onboarding() {
               <div className="space-y-2">
                 <Label>Department</Label>
                 <Select
-                  value={profile.department_id}
+                  value={profile.department_id || undefined}
                   onValueChange={(v) => setProfile({ ...profile, department_id: v })}
                 >
                   <SelectTrigger>
@@ -318,11 +358,8 @@ export default function Onboarding() {
               </Button>
             ) : (
               <Button
-                onClick={async () => {
-                  const next = step + 1;
-                  await saveProgress(next);
-                  setStep(next);
-                }}
+                onClick={() => void advanceStep(step + 1)}
+                disabled={saving}
               >
                 Continue
                 <ArrowRight className="ml-2 h-4 w-4" />

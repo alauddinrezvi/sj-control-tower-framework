@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import { markUserOnboardingComplete } from "@/hooks/useOnboarding";
 
 interface OnboardingWizardProps {
   open: boolean;
@@ -121,15 +122,7 @@ export default function OnboardingWizard({
 
       if (profileError) throw profileError;
 
-      // Save onboarding completion status
-      const { error: configError } = await supabase.from("app_config").upsert({
-        key: `user.${user.id}.onboarding_completed`,
-        value: true,
-        category: "user_preferences",
-        description: "User onboarding completion status",
-      });
-
-      if (configError) throw configError;
+      await markUserOnboardingComplete(user.id);
 
       // Log the activity
       await supabase.functions.invoke("log-activity", {

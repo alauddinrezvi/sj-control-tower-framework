@@ -9,7 +9,7 @@ import {
 
 interface EmailValidationIndicatorProps {
   email: string;
-  onValidationChange: (result: EmailValidationState) => void;
+  onValidationChange?: (result: EmailValidationState) => void;
   className?: string;
 }
 
@@ -80,7 +80,7 @@ export function EmailValidationIndicator({
   onValidationChangeRef.current = onValidationChange;
 
   useEffect(() => {
-    onValidationChangeRef.current(validation);
+    onValidationChangeRef.current?.(validation);
   }, [
     validation.isValid,
     validation.formatValid,

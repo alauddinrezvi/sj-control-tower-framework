@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useValidatePassword } from "@/hooks/useSecurityHardening";
+import { validatePasswordLocally } from "@/lib/password-validator";
 import { Loader2 } from "lucide-react";
 
 interface PasswordStrengthMeterProps {
@@ -31,6 +32,10 @@ export function PasswordStrengthMeter({
 }: PasswordStrengthMeterProps) {
   const validate = useValidatePassword();
   const [debouncedPassword, setDebouncedPassword] = useState(password);
+  const localResult = useMemo(
+    () => validatePasswordLocally(debouncedPassword),
+    [debouncedPassword]
+  );
 
   useEffect(() => {
     const timer = setTimeout(() => setDebouncedPassword(password), 400);
@@ -43,18 +48,20 @@ export function PasswordStrengthMeter({
       return;
     }
 
+    onValidationChange?.(localResult.valid);
+
     validate.mutate(debouncedPassword, {
       onSuccess: (result) => {
         onValidationChange?.(result.valid);
       },
       onError: () => {
-        onValidationChange?.(false);
+        onValidationChange?.(localResult.valid);
       },
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [debouncedPassword]);
+  }, [debouncedPassword, localResult.valid]);
 
-  const result = validate.data;
+  const result = validate.data ?? localResult;
   const score = result?.score ?? 0;
   const label = useMemo(() => scoreLabel(score), [score]);
 
