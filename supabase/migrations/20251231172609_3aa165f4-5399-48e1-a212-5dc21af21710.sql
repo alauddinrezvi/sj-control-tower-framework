@@ -1,3 +1,6 @@
+-- Grant admin to a specific user only if they exist (environment-specific seed)
 INSERT INTO public.user_roles (user_id, role)
-VALUES ('2d711b86-45bf-43ae-b216-7eb917668b58', 'admin')
+SELECT id, 'admin'::app_role
+FROM auth.users
+WHERE id = '2d711b86-45bf-43ae-b216-7eb917668b58'
 ON CONFLICT (user_id, role) DO NOTHING;

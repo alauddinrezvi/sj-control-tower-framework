@@ -1,9 +1,9 @@
 -- Enable pgvector extension if not already enabled
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA extensions;
 
 -- Create match_embeddings function for semantic search
-CREATE OR REPLACE FUNCTION match_embeddings(
-  query_embedding vector(1536),
+CREATE OR REPLACE FUNCTION public.match_embeddings(
+  query_embedding extensions.vector(1536),
   match_threshold float DEFAULT 0.7,
   match_count int DEFAULT 10
 )
@@ -17,6 +17,7 @@ RETURNS TABLE (
   similarity float
 )
 LANGUAGE plpgsql
+SET search_path = public, extensions
 AS $$
 BEGIN
   RETURN QUERY
@@ -28,7 +29,7 @@ BEGIN
     e.metadata,
     e.user_id,
     1 - (e.embedding <=> query_embedding) as similarity
-  FROM embeddings e
+  FROM public.embeddings e
   WHERE 1 - (e.embedding <=> query_embedding) > match_threshold
   ORDER BY e.embedding <=> query_embedding
   LIMIT match_count;
@@ -36,9 +37,8 @@ END;
 $$;
 
 -- Create index on embeddings for faster vector search
-CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON embeddings
-USING ivfflat (embedding vector_cosine_ops)
+CREATE INDEX IF NOT EXISTS idx_embeddings_vector ON public.embeddings
+USING ivfflat (embedding extensions.vector_cosine_ops)
 WITH (lists = 100);
 
--- Add comment
-COMMENT ON FUNCTION match_embeddings IS 'Performs vector similarity search on embeddings table using cosine similarity';
+COMMENT ON FUNCTION public.match_embeddings IS 'Performs vector similarity search on embeddings table using cosine similarity';

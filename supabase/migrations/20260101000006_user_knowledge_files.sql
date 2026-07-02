@@ -69,6 +69,13 @@ CREATE TRIGGER update_user_knowledge_files_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION public.update_updated_at_column();
 
+-- Link files to user_knowledge_sources (created in 20260101_knowledge_sources.sql)
+ALTER TABLE public.user_knowledge_files
+  ADD COLUMN IF NOT EXISTS knowledge_source_id UUID REFERENCES public.user_knowledge_sources(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_user_knowledge_files_source_id
+  ON public.user_knowledge_files(knowledge_source_id);
+
 -- Function to get file statistics
 CREATE OR REPLACE FUNCTION public.get_user_file_stats(p_user_id uuid)
 RETURNS jsonb AS $$

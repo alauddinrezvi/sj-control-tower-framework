@@ -120,22 +120,3 @@ CREATE TRIGGER update_user_knowledge_sources_updated_at
   BEFORE UPDATE ON public.user_knowledge_sources
   FOR EACH ROW
   EXECUTE FUNCTION public.update_updated_at_column();
-
--- ============================================
--- Update user_knowledge_files to add source_id reference
--- ============================================
-
--- Add foreign key to user_knowledge_files if not exists
-DO $$
-BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM information_schema.table_constraints
-    WHERE constraint_name = 'user_knowledge_files_source_fkey'
-  ) THEN
-    ALTER TABLE public.user_knowledge_files
-    ADD COLUMN knowledge_source_id UUID REFERENCES public.user_knowledge_sources(id) ON DELETE SET NULL;
-
-    CREATE INDEX idx_user_knowledge_files_source_id
-    ON public.user_knowledge_files(knowledge_source_id);
-  END IF;
-END $$;

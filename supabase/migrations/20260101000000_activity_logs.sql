@@ -15,21 +15,23 @@ CREATE TABLE IF NOT EXISTS public.activity_logs (
 );
 
 -- Create index for efficient queries
-CREATE INDEX idx_activity_logs_user_id ON public.activity_logs(user_id);
-CREATE INDEX idx_activity_logs_created_at ON public.activity_logs(created_at DESC);
-CREATE INDEX idx_activity_logs_action ON public.activity_logs(action);
-CREATE INDEX idx_activity_logs_resource ON public.activity_logs(resource_type, resource_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_user_id ON public.activity_logs(user_id);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_created_at ON public.activity_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_action ON public.activity_logs(action);
+CREATE INDEX IF NOT EXISTS idx_activity_logs_resource ON public.activity_logs(resource_type, resource_id);
 
 -- Enable RLS
 ALTER TABLE public.activity_logs ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Admins can view all activity logs" ON public.activity_logs;
 -- Admins can view all activity logs
 CREATE POLICY "Admins can view all activity logs"
   ON public.activity_logs
   FOR SELECT
   TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  USING (public.has_role(auth.uid(), 'admin'::app_role));
 
+DROP POLICY IF EXISTS "Users can view own activity logs" ON public.activity_logs;
 -- Users can view their own activity logs
 CREATE POLICY "Users can view own activity logs"
   ON public.activity_logs
@@ -37,13 +39,13 @@ CREATE POLICY "Users can view own activity logs"
   TO authenticated
   USING (user_id = auth.uid());
 
--- Only system/backend can insert logs (users can't manually create logs)
--- This will be done through edge functions or triggers
+DROP POLICY IF EXISTS "Service role can insert activity logs" ON public.activity_logs;
+-- Only admins can insert logs via authenticated clients (edge functions use service role)
 CREATE POLICY "Service role can insert activity logs"
   ON public.activity_logs
   FOR INSERT
   TO authenticated
-  USING (public.has_role(auth.uid(), 'admin'));
+  WITH CHECK (public.has_role(auth.uid(), 'admin'::app_role));
 
 -- Helper function to log activity
 CREATE OR REPLACE FUNCTION public.log_activity(

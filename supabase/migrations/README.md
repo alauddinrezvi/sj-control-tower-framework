@@ -1,113 +1,120 @@
 # Database Migrations
 
-This directory contains SQL migrations for the CollabAi platform.
+This directory contains **242 SQL migration files** that create the full SJ Control Tower database schema (tables, RLS policies, functions, triggers, indexes).
 
-## How to Apply Migrations
+## Quick Setup (New Supabase Project)
 
-### Option 1: Supabase Dashboard (Recommended)
+### 1. Prerequisites
 
-1. Go to your [Supabase Dashboard](https://supabase.com/dashboard)
-2. Select your project
-3. Navigate to **SQL Editor** in the left sidebar
-4. Copy the contents of each migration file and paste into the SQL Editor
-5. Click "Run" to execute the migration
+- [Supabase account](https://supabase.com) with a new project created
+- Node.js 18+ and `npm install` completed
+- `.env` configured with your project credentials (`VITE_SUPABASE_PROJECT_ID`, `VITE_SUPABASE_URL`, `VITE_SUPABASE_PUBLISHABLE_KEY`)
 
-### Option 2: Supabase CLI
+### 2. Apply Migrations (create all tables)
+
+**Windows (recommended):**
+
+```powershell
+npm run db:setup
+```
+
+**macOS / Linux:**
 
 ```bash
-# Install Supabase CLI
-npm install -g supabase
-
-# Link to your project
-supabase link --project-ref your-project-ref
-
-# Apply all migrations
-supabase db push
+npx supabase login
+npx supabase link --project-ref YOUR_PROJECT_REF
+npm run migrations:run
 ```
 
-## Migration Files
+This runs `supabase db push` and applies all 242 migrations in timestamp order.
 
-### 20241231_app_config.sql
-**Purpose:** Creates the `app_config` table for multi-tenant platform configuration
+### 3. Create Admin User
 
-**What it does:**
-- Creates `app_config` table with key-value storage (JSONB)
-- Enables RLS (Row Level Security)
-- Creates policies for admin access
-- Inserts default configuration values
-
-**Required:** ✅ Yes - Required for System Settings page to work
-
----
-
-### 20241231_user_invites.sql
-**Purpose:** Creates the `user_invites` table for user invitation system
-
-**What it does:**
-- Creates `user_invites` table with email, role, token fields
-- Enables RLS (Row Level Security)
-- Creates policies for admin access
-- Adds indexes for performance
-
-**Required:** ✅ Yes - Required for user invite functionality
-
----
-
-### 20241231_user_status.sql
-**Purpose:** Adds user activation/deactivation functionality
-
-**What it does:**
-- Adds `is_active` column to `profiles` table
-- Adds `deactivated_at` and `deactivated_by` columns
-- Creates index for active users
-- Sets all existing users to active
-
-**Required:** ✅ Yes - Required for user deactivation feature
-
----
-
-## Migration Order
-
-Apply migrations in this order:
-
-1. `20241231_app_config.sql`
-2. `20241231_user_invites.sql`
-3. `20241231_user_status.sql`
-
-## Verification
-
-After applying migrations, verify in **Supabase Dashboard → Table Editor**:
-
-- ✅ `app_config` table exists with default rows
-- ✅ `user_invites` table exists
-- ✅ `profiles` table has `is_active`, `deactivated_at`, `deactivated_by` columns
-
-## Rollback
-
-If you need to rollback these migrations:
+1. Start the app: `npm run dev`
+2. Sign up at http://localhost:8080
+3. In Supabase Dashboard → SQL Editor, grant admin:
 
 ```sql
--- Rollback app_config
-DROP TABLE IF EXISTS public.app_config CASCADE;
-
--- Rollback user_invites
-DROP TABLE IF EXISTS public.user_invites CASCADE;
-
--- Rollback user status columns
-ALTER TABLE public.profiles
-  DROP COLUMN IF EXISTS is_active,
-  DROP COLUMN IF EXISTS deactivated_at,
-  DROP COLUMN IF EXISTS deactivated_by;
+INSERT INTO public.user_roles (user_id, role)
+SELECT id, 'admin'::app_role FROM auth.users WHERE email = 'your@email.com'
+ON CONFLICT (user_id, role) DO NOTHING;
 ```
 
-## Notes
+### 4. Load Dummy Data
 
-- All tables have RLS enabled for security
-- Only admins can manage configuration and invites
-- The `app_config` table uses JSONB for flexible value storage
-- All timestamps use `timestamptz` (timezone-aware)
+One consolidated seed file: **`supabase/seed/dummy-data.sql`**
+
+**Option A — Supabase SQL Editor (easiest):**
+
+1. Open Supabase Dashboard → SQL Editor
+2. Paste the full contents of `supabase/seed/dummy-data.sql`
+3. Click Run
+
+**Option B — CLI (requires `DATABASE_URL` in `.env`):**
+
+```powershell
+npm run db:seed
+```
+
+Dummy data includes: clients, tasks, EOS/OKRs, meetings, knowledge base entries, projects, deals, productivity records, AI agents, and notifications.
 
 ---
 
-**Last Updated:** 2024-12-31
-**Platform:** [Supabase](https://supabase.com)
+## Migration File Structure
+
+```
+supabase/
+├── migrations/           # 242 schema migrations (this folder)
+│   ├── 20251231002141_*.sql   # Foundation: profiles, roles, clients, meetings, knowledge
+│   ├── 20260201_*.sql         # App modules, RBAC extensions
+│   ├── 20260623120000_automation_engine.sql
+│   ├── 20260629120000_graphify_core.sql
+│   └── ...
+├── seed/
+│   ├── dummy-data.sql    # Single consolidated dummy data file
+│   ├── 00-platform-core.sql   # Individual module seeds (used to build dummy-data.sql)
+│   └── ...
+└── seed.sql              # Auto-loaded on `supabase db reset` (local dev)
+```
+
+### Naming Conventions
+
+- `YYYYMMDDHHMMSS_<description>.sql` — descriptive migrations
+- `YYYYMMDDHHMMSS_<uuid>.sql` — Lovable-generated migrations
+
+### Typical Migration Pattern
+
+```sql
+CREATE TABLE IF NOT EXISTS public.my_table (...);
+CREATE INDEX IF NOT EXISTS idx_my_table_... ON public.my_table(...);
+ALTER TABLE public.my_table ENABLE ROW LEVEL SECURITY;
+CREATE POLICY "..." ON public.my_table FOR SELECT TO authenticated USING (...);
+NOTIFY pgrst, 'reload schema';
+```
+
+---
+
+## Troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| Remote migration versions not found | `npm run migrations:repair` |
+| Table already exists | `npm run migrations:mark-applied` then `npm run migrations:run` |
+| Seed aborted: no auth users | Sign up a user first, then re-run seed |
+| Project not linked | `npx supabase link --project-ref YOUR_PROJECT_REF` |
+
+---
+
+## Regenerate TypeScript Types
+
+After applying migrations:
+
+```bash
+npx supabase gen types typescript --project-id YOUR_PROJECT_REF > src/integrations/supabase/types.ts
+```
+
+---
+
+**Database:** PostgreSQL 15 via Supabase  
+**Tables:** ~206 tables + 13 views  
+**Last updated:** 2026-07-02
