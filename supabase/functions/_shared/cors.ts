@@ -37,13 +37,25 @@ export function getCorsHeaders(origin: string | null): Record<string, string> {
   
   // Allow localhost
   const isLocalhost = origin?.startsWith('http://localhost:') || origin?.startsWith('http://127.0.0.1:');
-  
-  const isAllowed = origin && (isLovablePreview || isSJInnovationCom || isSJInnovationUs || isLocalhost);
+
+  // Allow collabai.software subdomains
+  const isCollabai =
+    origin?.endsWith('.collabai.software') || origin === 'https://collabai.software';
+
+  const isAllowed =
+    origin &&
+    (isLovablePreview ||
+      isSJInnovationCom ||
+      isSJInnovationUs ||
+      isLocalhost ||
+      isCollabai ||
+      ALLOWED_ORIGINS.includes(origin));
   const allowedOrigin = isAllowed ? origin : ALLOWED_ORIGINS[0];
 
   return {
     'Access-Control-Allow-Origin': allowedOrigin,
-    'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-api-key',
+    'Access-Control-Allow-Headers':
+      'authorization, x-client-info, apikey, content-type, x-api-key, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version',
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
     'Access-Control-Max-Age': '3600',
     'Access-Control-Allow-Credentials': 'true',

@@ -1,27 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-
-function getCorsHeaders(origin: string | null): Record<string, string> {
-  const isLovablePreview =
-    origin?.endsWith(".lovableproject.com") || origin?.endsWith(".lovable.app");
-  const isSJInnovationCom =
-    origin?.endsWith(".sjinnovation.com") || origin === "https://sjinnovation.com";
-  const isSJInnovationUs =
-    origin?.endsWith(".sjinnovation.us") || origin === "https://sjinnovation.us";
-  const isLocalhost =
-    origin?.startsWith("http://localhost:") || origin?.startsWith("http://127.0.0.1:");
-  const isAllowed =
-    origin &&
-    (isLovablePreview || isSJInnovationCom || isSJInnovationUs || isLocalhost);
-  return {
-    "Access-Control-Allow-Origin": isAllowed ? origin : "http://localhost:8080",
-    "Access-Control-Allow-Headers":
-      "authorization, x-client-info, apikey, content-type, x-api-key, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
-    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
-    "Access-Control-Max-Age": "3600",
-    "Access-Control-Allow-Credentials": "true",
-  };
-}
+import { getCorsHeaders, handleCorsPreflight } from "../_shared/cors.ts";
 
 const EMAIL_REGEX =
   /^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/;
@@ -38,7 +17,7 @@ serve(async (req) => {
   const corsHeaders = getCorsHeaders(req.headers.get("Origin"));
 
   if (req.method === "OPTIONS") {
-    return new Response("ok", { headers: corsHeaders });
+    return handleCorsPreflight(req.headers.get("Origin"));
   }
 
   try {
