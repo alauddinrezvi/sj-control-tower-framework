@@ -11,9 +11,10 @@ import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
 import { Label } from "@/components/ui/label";
 import { cn } from "@/lib/utils";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import type { AgencyRole } from "@/hooks/useAgencyRole";
+import { saveAgencyRolePreferences } from "@/lib/role-preferences-storage";
+import { toast } from "sonner";
 
 interface RoleOption {
   role: AgencyRole;
@@ -84,22 +85,16 @@ export function RoleSetupModal({ open }: RoleSetupModalProps) {
     if (!selected || !user) return;
     setSaving(true);
     try {
-      const { error } = await supabase
-        .from("user_role_preferences")
-        .upsert(
-          {
-            user_id: user.id,
-            role: "user",
-            agency_role: selected,
-            is_eos_user: selected === "owner" ? isEos : false,
-          },
-          { onConflict: "user_id,role" }
-        );
-      if (error) throw error;
-      // Patch AuthContext profile so Dashboard re-routes instantly
+      await saveAgencyRolePreferences(
+        user.id,
+        selected,
+        selected === "owner" ? isEos : false
+      );
       await refreshAgencyPreferences();
-    } catch (err) {
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save agency role";
       console.error("Failed to save agency role:", err);
+      toast.error(message);
     } finally {
       setSaving(false);
     }

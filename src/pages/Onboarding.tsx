@@ -28,7 +28,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { logRbacEvent } from "@/lib/activity-logger";
-import { markUserOnboardingComplete } from "@/hooks/useOnboarding";
+import {
+  loadOnboardingState,
+  markUserOnboardingComplete,
+  saveOnboardingStep,
+} from "@/lib/onboarding-storage";
 
 const STEPS = [
   { id: 1, title: "Welcome" },
@@ -49,7 +53,7 @@ const TIMEZONES = [
 ];
 
 export default function Onboarding() {
-  const { user, updateProfile, loading: authLoading } = useAuth();
+  const { user, loading: authLoading } = useAuth();
   const navigate = useNavigate();
   const { data: departments } = useDepartments();
   const [step, setStep] = useState(1);
@@ -74,25 +78,17 @@ export default function Onboarding() {
 
     const load = async (): Promise<void> => {
       try {
-        const { data, error } = await (supabase as any)
-          .from("onboarding_progress")
-          .select("*")
-          .eq("user_id", user.id)
-          .maybeSingle();
-
-        if (error) {
-          console.error("Failed to load onboarding progress:", error);
-        }
+        const onboardingState = await loadOnboardingState(user.id);
 
         if (cancelled) return;
 
-        if (data?.completed_at) {
+        if (onboardingState.completed) {
           navigate("/dashboard", { replace: true });
           return;
         }
 
-        if (data?.current_step) {
-          setStep(data.current_step);
+        if (onboardingState.currentStep) {
+          setStep(onboardingState.currentStep);
         }
 
         const { data: prof } = await supabase
@@ -130,20 +126,7 @@ export default function Onboarding() {
 
   const saveProgress = async (nextStep: number, completed = false): Promise<void> => {
     if (!user) return;
-    const { error } = await (supabase as any).from("onboarding_progress").upsert(
-      {
-        user_id: user.id,
-        current_step: nextStep,
-        steps_completed: { [`step_${step}`]: true },
-        completed_at: completed ? new Date().toISOString() : null,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" }
-    );
-
-    if (error) {
-      throw error;
-    }
+    await saveOnboardingStep(user.id, step, nextStep, completed);
   };
 
   const advanceStep = async (nextStep: number): Promise<void> => {
@@ -161,31 +144,71 @@ export default function Onboarding() {
       toast.error("Please enter your name");
       return;
     }
+
     setSaving(true);
     try {
-      await updateProfile({ full_name: profile.full_name });
-      await supabase
+      const { data: existingProfile, error: existingError } = await supabase
         .from("profiles")
-        .update({
-          metadata: {
-            job_title: profile.job_title,
-            department_id: profile.department_id,
-            timezone: profile.timezone,
-          },
-        })
-        .eq("id", user.id);
+        .select("metadata")
+        .eq("id", user.id)
+        .maybeSingle();
 
-      if (profile.department_id) {
-        await (supabase as any).from("department_users").upsert(
-          { department_id: profile.department_id, user_id: user.id },
-          { onConflict: "department_id,user_id" }
-        );
+      if (existingError) {
+        throw existingError;
       }
 
-      await saveProgress(3);
+      const existingMetadata =
+        existingProfile?.metadata && typeof existingProfile.metadata === "object"
+          ? (existingProfile.metadata as Record<string, unknown>)
+          : {};
+
+      const metadata = {
+        ...existingMetadata,
+        job_title: profile.job_title.trim(),
+        department_id: profile.department_id || null,
+        timezone: profile.timezone,
+      };
+
+      const { error: profileError } = await supabase.from("profiles").upsert(
+        {
+          id: user.id,
+          email: user.email ?? null,
+          full_name: profile.full_name.trim(),
+          metadata,
+        },
+        { onConflict: "id" }
+      );
+
+      if (profileError) {
+        throw profileError;
+      }
+
+      if (profile.department_id) {
+        const { error: departmentError } = await (supabase as any)
+          .from("department_users")
+          .upsert(
+            { department_id: profile.department_id, user_id: user.id },
+            { onConflict: "department_id,user_id" }
+          );
+
+        if (departmentError) {
+          console.warn("Department assignment skipped:", departmentError.message);
+          toast.error("Profile saved, but department could not be assigned.");
+        }
+      }
+
+      try {
+        await saveProgress(3);
+      } catch (progressError) {
+        console.warn("Failed to save onboarding progress:", progressError);
+        toast.error("Profile saved, but progress could not be synced.");
+      }
+
       setStep(3);
-    } catch {
-      toast.error("Failed to save profile");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to save profile";
+      console.error("Onboarding profile save failed:", error);
+      toast.error(message);
     } finally {
       setSaving(false);
     }
@@ -199,8 +222,10 @@ export default function Onboarding() {
       logRbacEvent("onboarding.completed", { user_id: user.id });
       toast.success("Welcome to Control Tower!");
       navigate("/dashboard", { replace: true });
-    } catch {
-      toast.error("Failed to complete onboarding");
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : "Failed to complete onboarding";
+      console.error("Onboarding completion failed:", error);
+      toast.error(message);
     } finally {
       setSaving(false);
     }

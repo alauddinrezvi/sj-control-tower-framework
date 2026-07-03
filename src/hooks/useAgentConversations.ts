@@ -7,7 +7,18 @@ import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 import { queryKeys } from "@/lib/cache";
 import { API } from "@/shared/config/api";
+import { isMissingTable } from "@/lib/supabase-errors";
 import { toast } from "sonner";
+
+const CONVERSATIONS_UNAVAILABLE =
+  "Agent conversations are not available yet. Ask an admin to run the agent_messages database migration.";
+
+function isConversationsSchemaMissing(error: unknown): boolean {
+  return (
+    isMissingTable(error, "agent_conversations") ||
+    isMissingTable(error, "agent_messages")
+  );
+}
 
 // Type-bridge: tables exist in DB but not yet in generated types
 const db = supabase as any;
@@ -85,7 +96,10 @@ export function useAgentConversations(agentId: string | undefined) {
         .order("last_message_at", { ascending: false, nullsFirst: false })
         .limit(50);
 
-      if (error) throw error;
+      if (error) {
+        if (isConversationsSchemaMissing(error)) return [];
+        throw error;
+      }
       return (data ?? []) as AgentConversation[];
     },
     enabled: !!agentId && !!user?.id,
@@ -107,6 +121,7 @@ export function useAgentConversation(conversationId: string | null) {
 
       if (error) {
         if (error.code === "PGRST116") return null;
+        if (isConversationsSchemaMissing(error)) return null;
         throw error;
       }
       return data as AgentConversation;
@@ -126,7 +141,10 @@ export function useAgentMessages(conversationId: string | null) {
         .eq("conversation_id", conversationId)
         .order("created_at", { ascending: true });
 
-      if (error) throw error;
+      if (error) {
+        if (isConversationsSchemaMissing(error)) return [];
+        throw error;
+      }
       return (data ?? []) as AgentMessage[];
     },
     enabled: !!conversationId,
@@ -163,7 +181,12 @@ export function useCreateConversation() {
         .select("id, agent_id, user_id, title, summary, is_archived, is_pinned, message_count, last_message_at, metadata, created_at, updated_at")
         .single();
 
-      if (error) throw error;
+      if (error) {
+        if (isConversationsSchemaMissing(error)) {
+          throw new Error(CONVERSATIONS_UNAVAILABLE);
+        }
+        throw error;
+      }
       queryClient.invalidateQueries({ queryKey: queryKeys.ai.conversations(data.agent_id) });
       return row as AgentConversation;
     },
@@ -185,7 +208,12 @@ export function useSendMessage() {
         role: "user",
         content,
       });
-      if (insertUserError) throw insertUserError;
+      if (insertUserError) {
+        if (isConversationsSchemaMissing(insertUserError)) {
+          throw new Error(CONVERSATIONS_UNAVAILABLE);
+        }
+        throw insertUserError;
+      }
 
       queryClient.invalidateQueries({ queryKey: queryKeys.ai.messages(conversation_id) });
 
@@ -265,7 +293,12 @@ export function useSendMessage() {
         latency_ms: result.latency_ms ?? null,
         metadata: mcpMeta ?? {},
       });
-      if (insertAssistantError) throw insertAssistantError;
+      if (insertAssistantError) {
+        if (isConversationsSchemaMissing(insertAssistantError)) {
+          throw new Error(CONVERSATIONS_UNAVAILABLE);
+        }
+        throw insertAssistantError;
+      }
 
       // 5. Extract memories after each reply (fire-and-forget, never blocks chat)
       if (memory_enabled) {
@@ -379,7 +412,10 @@ export function useArchivedConversations(agentId: string | undefined) {
         .order("last_message_at", { ascending: false, nullsFirst: false })
         .limit(50);
 
-      if (error) throw error;
+      if (error) {
+        if (isConversationsSchemaMissing(error)) return [];
+        throw error;
+      }
       return (data ?? []) as AgentConversation[];
     },
     enabled: !!agentId && !!user?.id,

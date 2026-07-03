@@ -1,54 +1,9 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
+import { hasCompletedUserOnboarding, markUserOnboardingComplete } from "@/lib/onboarding-storage";
 
-const completedOnboardingUserIds = new Set<string>();
-
-function rememberOnboardingComplete(userId: string): void {
-  completedOnboardingUserIds.add(userId);
-}
-
-async function hasCompletedUserOnboarding(userId: string): Promise<boolean> {
-  if (completedOnboardingUserIds.has(userId)) {
-    return true;
-  }
-
-  const { data: progress, error } = await (supabase as any)
-    .from("onboarding_progress")
-    .select("completed_at")
-    .eq("user_id", userId)
-    .maybeSingle();
-
-  if (error) {
-    console.error("Error loading onboarding progress:", error);
-    return false;
-  }
-
-  const completed = Boolean(progress?.completed_at);
-  if (completed) {
-    rememberOnboardingComplete(userId);
-  }
-
-  return completed;
-}
-
-export async function markUserOnboardingComplete(userId: string): Promise<void> {
-  const { error } = await (supabase as any).from("onboarding_progress").upsert(
-    {
-      user_id: userId,
-      current_step: 5,
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    },
-    { onConflict: "user_id" }
-  );
-
-  if (error) {
-    throw error;
-  }
-
-  rememberOnboardingComplete(userId);
-}
+export { hasCompletedUserOnboarding, markUserOnboardingComplete } from "@/lib/onboarding-storage";
 
 export function useOnboarding() {
   const [showOnboarding, setShowOnboarding] = useState(false);

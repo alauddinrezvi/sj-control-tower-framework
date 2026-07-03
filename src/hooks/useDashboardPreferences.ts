@@ -1,22 +1,15 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { queryKeys, cacheConfig } from "@/lib/cache";
 import { useAuth } from "@/contexts/AuthContext";
+import {
+  DEFAULT_DASHBOARD_PREFERENCES,
+  getDashboardPreferences,
+  saveDashboardPreferences,
+  type DashboardPreferencesRecord,
+} from "@/lib/role-preferences-storage";
 
-export interface DashboardPreferences {
-  ai_digest_enabled: boolean;
-  ai_digest_frequency: "weekly" | "daily";
-  hide_completed_tasks: boolean;
-  primary_pod_id: string | null;
-}
-
-const DEFAULTS: DashboardPreferences = {
-  ai_digest_enabled: true,
-  ai_digest_frequency: "weekly",
-  hide_completed_tasks: false,
-  primary_pod_id: null,
-};
+export type DashboardPreferences = DashboardPreferencesRecord;
 
 export function useDashboardPreferences() {
   const { user } = useAuth();
@@ -26,22 +19,8 @@ export function useDashboardPreferences() {
   const query = useQuery<DashboardPreferences>({
     queryKey: qKey,
     queryFn: async (): Promise<DashboardPreferences> => {
-      const { data, error } = await (supabase as any)
-        .from("user_role_preferences")
-        .select("ai_digest_enabled, ai_digest_frequency, hide_completed_tasks, primary_pod_id")
-        .eq("user_id", user!.id)
-        .limit(1)
-        .maybeSingle();
-
-      if (error) throw error;
-      if (!data) return DEFAULTS;
-
-      return {
-        ai_digest_enabled: data.ai_digest_enabled ?? DEFAULTS.ai_digest_enabled,
-        ai_digest_frequency: (data.ai_digest_frequency as "weekly" | "daily") ?? DEFAULTS.ai_digest_frequency,
-        hide_completed_tasks: data.hide_completed_tasks ?? DEFAULTS.hide_completed_tasks,
-        primary_pod_id: data.primary_pod_id ?? null,
-      };
+      if (!user) return DEFAULT_DASHBOARD_PREFERENCES;
+      return getDashboardPreferences(user.id);
     },
     enabled: !!user,
     staleTime: cacheConfig.staleTime.long,
@@ -49,19 +28,14 @@ export function useDashboardPreferences() {
 
   const mutation = useMutation({
     mutationFn: async (patch: Partial<DashboardPreferences>) => {
-      const { error } = await (supabase as any)
-        .from("user_role_preferences")
-        .upsert(
-          { user_id: user!.id, role: "user", ...patch },
-          { onConflict: "user_id,role" }
-        );
-      if (error) throw error;
+      if (!user) return;
+      await saveDashboardPreferences(user.id, patch);
     },
     onMutate: async (patch) => {
       await queryClient.cancelQueries({ queryKey: qKey });
       const prev = queryClient.getQueryData<DashboardPreferences>(qKey);
       queryClient.setQueryData<DashboardPreferences>(qKey, (old) => ({
-        ...(old ?? DEFAULTS),
+        ...(old ?? DEFAULT_DASHBOARD_PREFERENCES),
         ...patch,
       }));
       return { prev };
@@ -76,7 +50,7 @@ export function useDashboardPreferences() {
   });
 
   return {
-    preferences: query.data ?? DEFAULTS,
+    preferences: query.data ?? DEFAULT_DASHBOARD_PREFERENCES,
     isLoading: query.isLoading,
     updatePreference: (patch: Partial<DashboardPreferences>) => mutation.mutate(patch),
     isPending: mutation.isPending,

@@ -6,6 +6,63 @@ import { queryKeys, invalidateKeys } from "@/lib/cache";
 import { syncAgentMcpServers } from "@/lib/agent-mcp-sync";
 import { syncAgentKnowledgeFiles } from "@/modules/knowledge/api/file";
 import { slugify } from "@/lib/slug";
+import { getMissingColumnName, omitPayloadColumn } from "@/lib/supabase-errors";
+
+async function insertAgentRow(payload: Record<string, unknown>): Promise<Record<string, unknown>> {
+  let body: Record<string, unknown> = { ...payload };
+
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    const { data, error } = await supabase
+      .from("ai_agents")
+      .insert(body as never)
+      .select()
+      .single();
+
+    if (!error && data) {
+      return data as Record<string, unknown>;
+    }
+
+    const missingColumn = getMissingColumnName(error);
+    if (!missingColumn || !(missingColumn in body)) {
+      throw error;
+    }
+
+    console.warn(`ai_agents insert retry without column: ${missingColumn}`);
+    body = omitPayloadColumn(body, missingColumn);
+  }
+
+  throw new Error("Failed to create agent after removing unsupported columns");
+}
+
+async function updateAgentRow(
+  id: string,
+  payload: Record<string, unknown>
+): Promise<Record<string, unknown>> {
+  let body: Record<string, unknown> = { ...payload };
+
+  for (let attempt = 0; attempt < 15; attempt += 1) {
+    const { data, error } = await supabase
+      .from("ai_agents")
+      .update(body as never)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (!error && data) {
+      return data as Record<string, unknown>;
+    }
+
+    const missingColumn = getMissingColumnName(error);
+    if (!missingColumn || !(missingColumn in body)) {
+      throw error;
+    }
+
+    console.warn(`ai_agents update retry without column: ${missingColumn}`);
+    body = omitPayloadColumn(body, missingColumn);
+  }
+
+  throw new Error("Failed to update agent after removing unsupported columns");
+}
 
 async function generateUniqueAgentSlug(
   preferred: string,
@@ -191,9 +248,7 @@ export function useCreateAgent() {
       const mcpServerIds = data.mcp_server_ids || [];
       const mcpEnabled = mcpServerIds.length > 0 || (data.tool_mcp ?? false);
 
-      const { data: agent, error } = await supabase
-        .from("ai_agents")
-        .insert({
+      const agent = await insertAgentRow({
           name: data.name,
           slug,
           description: data.description || null,
@@ -215,21 +270,17 @@ export function useCreateAgent() {
           tool_mcp: mcpEnabled,
           mcp_server_ids: mcpServerIds,
           tools_config: data.tools_config || [],
-        } as never)
-        .select()
-        .single();
-
-      if (error) throw error;
+        });
 
       await syncAgentMcpServers(
-        agent.id,
+        String(agent.id),
         mcpServerIds,
         mcpEnabled
       );
 
       if (data.attached_knowledge_files && data.attached_knowledge_files.length > 0) {
         try {
-          await syncAgentKnowledgeFiles(agent.id, data.attached_knowledge_files);
+          await syncAgentKnowledgeFiles(String(agent.id), data.attached_knowledge_files);
         } catch (syncError) {
           console.error("Failed to link knowledge files to agent:", syncError);
           toast.warning(
@@ -298,19 +349,12 @@ export function useUpdateAgent() {
       }
       if (data.tools_config !== undefined) updateData.tools_config = data.tools_config || [];
 
-      const { data: agent, error } = await supabase
-        .from("ai_agents")
-        .update(updateData as any)
-        .eq("id", id)
-        .select()
-        .single();
-
-      if (error) throw error;
+      const agent = await updateAgentRow(id, updateData);
 
       const mcpEnabled = data.tool_mcp ?? (agent as unknown as AIAgent).tool_mcp ?? false;
       const serverIds =
         data.mcp_server_ids ?? (agent as unknown as AIAgent).mcp_server_ids ?? [];
-      await syncAgentMcpServers(agent.id, serverIds, mcpEnabled);
+      await syncAgentMcpServers(String(agent.id), serverIds, mcpEnabled);
 
       return agent as unknown as AIAgent;
     },

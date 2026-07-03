@@ -4,6 +4,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useToast } from "@/hooks/use-toast";
 import { logLogin, logLogout } from "@/lib/activity-logger";
 import { recordLoginAttempt } from "@/hooks/useSecurityHardening";
+import { getAgencyPreferences } from "@/lib/role-preferences-storage";
 
 interface Profile {
   id: string;
@@ -94,22 +95,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     userId: string
   ): Promise<{ agencyRole?: "owner" | "pm" | "ic" | "bd"; isEosUser: boolean }> => {
     try {
-      const { data, error } = await (supabase as any)
-        .from("user_role_preferences")
-        .select("agency_role, is_eos_user")
-        .eq("user_id", userId)
-        .limit(1)
-        .maybeSingle();
-
-      if (error) {
-        console.error("Error fetching agency preferences:", error);
-        return { isEosUser: false };
-      }
-
-      return {
-        agencyRole: (data?.agency_role as "owner" | "pm" | "ic" | "bd" | null) ?? undefined,
-        isEosUser: data?.is_eos_user ?? false,
-      };
+      return await getAgencyPreferences(userId);
     } catch (error) {
       console.error("Error fetching agency preferences:", error);
       return { isEosUser: false };

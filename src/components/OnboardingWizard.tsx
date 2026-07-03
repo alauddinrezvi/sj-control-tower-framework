@@ -24,7 +24,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
-import { markUserOnboardingComplete } from "@/hooks/useOnboarding";
+import { markUserOnboardingComplete } from "@/lib/onboarding-storage";
 
 interface OnboardingWizardProps {
   open: boolean;
