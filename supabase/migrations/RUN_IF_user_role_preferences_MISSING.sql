@@ -1,5 +1,8 @@
--- Ensure user_role_preferences exists for dashboard role routing
--- Safe on minimal schemas: creates app_role if missing, no department_users dependency.
+-- ============================================================================
+-- ONE-TIME FIX: Create user_role_preferences
+-- Run in Supabase Dashboard → SQL Editor if role setup fails with PGRST205
+-- "Could not find the table 'public.user_role_preferences'"
+-- ============================================================================
 
 DO $$
 BEGIN

@@ -1,10 +1,6 @@
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts"
 import { createClient, type SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2'
-
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-}
+import { getCorsHeaders, handleCorsPreflight } from '../_shared/cors.ts'
 
 // --- AI model policy + provider routing (inlined for single-file dashboard deploy) ---
 
@@ -51,6 +47,26 @@ const DEFAULT_AI_MODEL_POLICY: AIModelPolicy = {
   default_chat_model_id: null,
   default_provider_slug: null,
   user_visible_models: 'all_enabled',
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message
+    if (typeof message === 'string' && message.length > 0) return message
+  }
+  return 'Unknown error'
+}
+
+function isMissingDbObject(error: unknown, objectName: string): boolean {
+  if (!error || typeof error !== 'object') return false
+  const postgrestError = error as { code?: string; message?: string }
+  return (
+    (postgrestError.code === 'PGRST205' ||
+      postgrestError.code === 'PGRST204' ||
+      postgrestError.code === '42P01') &&
+    (postgrestError.message?.includes(objectName) ?? false)
+  )
 }
 
 interface AllowedChatModel {
@@ -125,7 +141,12 @@ async function getAIModelPolicy(supabase: SupabaseClient): Promise<AIModelPolicy
     .select('ai_model_policy')
     .is('organization_id', null)
     .maybeSingle()
-  if (error) throw error
+  if (error) {
+    if (!isMissingDbObject(error, 'integration_settings')) {
+      console.warn('[agent-conversation-chat] getAIModelPolicy:', error.message)
+    }
+    return { ...DEFAULT_AI_MODEL_POLICY }
+  }
   return normalizeAIModelPolicy(data?.ai_model_policy)
 }
 
@@ -135,7 +156,12 @@ async function getConnectedAIProviderIds(supabase: SupabaseClient): Promise<Set<
     .select('connection_status, enabled, provider:integration_providers(slug)')
     .eq('connection_status', 'connected')
     .eq('enabled', true)
-  if (orgError) throw orgError
+  if (orgError) {
+    if (!isMissingDbObject(orgError, 'organization_integrations')) {
+      console.warn('[agent-conversation-chat] organization_integrations:', orgError.message)
+    }
+    return new Set()
+  }
 
   const connectedIntegrationSlugs = new Set<string>()
   for (const row of orgIntegrations ?? []) {
@@ -149,21 +175,35 @@ async function getConnectedAIProviderIds(supabase: SupabaseClient): Promise<Set<
   if (aiSlugs.length === 0) return new Set()
 
   const { data: providers, error: provError } = await supabase.from('ai_providers').select('id').in('slug', aiSlugs)
-  if (provError) throw provError
+  if (provError) {
+    if (!isMissingDbObject(provError, 'ai_providers')) {
+      console.warn('[agent-conversation-chat] ai_providers:', provError.message)
+    }
+    return new Set()
+  }
   return new Set((providers ?? []).map((p: { id: string }) => p.id))
 }
 
 async function fetchAllowedChatModels(supabase: SupabaseClient): Promise<AllowedChatModel[]> {
   const connectedProviderIds = await getConnectedAIProviderIds(supabase)
-  if (connectedProviderIds.size === 0) return []
 
   const { data, error } = await supabase
     .from('ai_models')
     .select('id, is_default, provider_id')
     .eq('category', 'chat')
     .eq('enabled', true)
-  if (error) throw error
-  return (data ?? []).filter((m: AllowedChatModel) => connectedProviderIds.has(m.provider_id))
+  if (error) {
+    if (!isMissingDbObject(error, 'ai_models')) {
+      console.warn('[agent-conversation-chat] ai_models:', error.message)
+    }
+    return []
+  }
+
+  const models = (data ?? []) as AllowedChatModel[]
+  if (connectedProviderIds.size === 0) {
+    return models
+  }
+  return models.filter((m) => connectedProviderIds.has(m.provider_id))
 }
 
 function filterModelsForPolicy(policy: AIModelPolicy, models: AllowedChatModel[]): AllowedChatModel[] {
@@ -317,7 +357,12 @@ async function getSensitiveFieldKeysForProvider(
     .from('integration_fields')
     .select('field_key, is_sensitive')
     .eq('provider_id', providerId)
-  if (error) throw error
+  if (error) {
+    if (!isMissingDbObject(error, 'integration_fields')) {
+      console.warn('[agent-conversation-chat] integration_fields:', error.message)
+    }
+    return new Set<string>()
+  }
   const keys = new Set<string>()
   for (const row of data ?? []) {
     const fieldKey = row.field_key as string
@@ -439,6 +484,21 @@ async function getModel(
   return null
 }
 
+function formatProviderApiError(provider: string, status: number, body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { error?: { message?: string; code?: string } }
+    const code = parsed.error?.code
+    const message = parsed.error?.message
+    if (status === 401 && code === 'invalid_api_key') {
+      return `Invalid ${provider} API key. Update OPENAI_API_KEY in Supabase → Project Settings → Edge Functions → Secrets.`
+    }
+    if (message) return `${provider} API error: ${message}`
+  } catch {
+    // fall through
+  }
+  return `${provider} API error (${status}): ${body.slice(0, 200)}`
+}
+
 async function chatOpenAI(apiKey: string, request: ChatCompletionRequest): Promise<ChatCompletionResponse> {
   const response = await fetch('https://api.openai.com/v1/chat/completions', {
     method: 'POST',
@@ -450,7 +510,9 @@ async function chatOpenAI(apiKey: string, request: ChatCompletionRequest): Promi
       max_tokens: request.max_tokens ?? 1000,
     }),
   })
-  if (!response.ok) throw new Error(`OpenAI API error: ${await response.text()}`)
+  if (!response.ok) {
+    throw new Error(formatProviderApiError('OpenAI', response.status, await response.text()))
+  }
   const data = await response.json()
   return {
     content: data.choices[0].message.content,
@@ -574,6 +636,13 @@ async function chatCompletion(
     if (data) model = data as AIModel
   }
   if (!model || !model.ai_providers) {
+    const openaiKey = Deno.env.get('OPENAI_API_KEY')
+    if (openaiKey) {
+      return chatOpenAI(openaiKey, {
+        ...request,
+        model: request.model || 'gpt-4o-mini',
+      })
+    }
     const lovableKey = Deno.env.get('LOVABLE_API_KEY')
     if (lovableKey) {
       const response = await fetch('https://ai.gateway.lovable.dev/v1/chat/completions', {
@@ -1726,8 +1795,10 @@ function buildMcpToolSystemPrompt(toolDefs: AgentMcpToolDef[]): string {
 }
 
 serve(async (req) => {
+  const corsHeaders = getCorsHeaders(req.headers.get('Origin'))
+
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: corsHeaders })
+    return handleCorsPreflight(req.headers.get('Origin'))
   }
 
   const startTime = Date.now()
@@ -2117,27 +2188,29 @@ serve(async (req) => {
 
     // 8. Get the model for cost calculation and logging
     const model = await getModel(supabaseClient, effectiveModelId, 'chat')
-    if (!model) {
-      throw new Error('Model not found')
+    if (!model && !Deno.env.get('OPENAI_API_KEY')) {
+      throw new Error('Model not found — configure ai_models or set OPENAI_API_KEY in Supabase secrets')
     }
 
-    // 9. Calculate cost
-    const cost = calculateCost(model, response.input_tokens, response.output_tokens, 0)
+    const cost = model
+      ? calculateCost(model, response.input_tokens, response.output_tokens, 0)
+      : 0
 
-    // 10. Log usage
-    await logUsage(
-      supabaseClient,
-      user_id,
-      model.id,
-      'agent-conversation-chat',
-      response.input_tokens,
-      response.output_tokens,
-      0,
-      cost,
-      { agent_id, conversation_id }
-    )
+    if (model) {
+      await logUsage(
+        supabaseClient,
+        user_id,
+        model.id,
+        'agent-conversation-chat',
+        response.input_tokens,
+        response.output_tokens,
+        0,
+        cost,
+        { agent_id, conversation_id }
+      )
+    }
 
-    // 11. Update agent usage count
+    // 11. Update agent usage count (best-effort)
     await supabaseClient
       .from('ai_agents')
       .update({ usage_count: (agent.usage_count || 0) + 1 })
@@ -2147,7 +2220,7 @@ serve(async (req) => {
       JSON.stringify({
         response: response.content,
         model_used: response.model,
-        provider_used: model.ai_providers?.slug || 'unknown',
+        provider_used: model?.ai_providers?.slug || 'openai',
         tokens_input: response.input_tokens,
         tokens_output: response.output_tokens,
         latency_ms: latency,
@@ -2172,7 +2245,7 @@ serve(async (req) => {
     )
   } catch (error: unknown) {
     console.error('Agent conversation chat error:', error)
-    const message = error instanceof Error ? error.message : 'Unknown error'
+    const message = toErrorMessage(error)
     return new Response(
       JSON.stringify({ error: message }),
       { headers: { ...corsHeaders, 'Content-Type': 'application/json' }, status: 500 }

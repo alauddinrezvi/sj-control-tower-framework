@@ -5,6 +5,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
+import { isMissingTable } from '@/lib/supabase-errors';
 import {
   IntegrationCategory,
   IntegrationProvider,
@@ -156,7 +157,12 @@ export function useOrganizationIntegrations() {
         `)
         .eq('user_id', user.id);
 
-      if (error) throw error;
+      if (error) {
+        if (isMissingTable(error, "organization_integrations")) {
+          return [];
+        }
+        throw error;
+      }
       return data as (OrganizationIntegration & { provider: IntegrationProvider })[];
     },
     staleTime: 5 * 60 * 1000, // 5 minutes

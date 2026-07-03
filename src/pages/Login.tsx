@@ -13,6 +13,14 @@ const TEST_ACCOUNTS = [
   { label: "Project Manager", email: "demo@collabai.software", role: "pm", icon: Briefcase, color: "border-blue-500/30 hover:bg-blue-500/10" },
   { label: "IC", email: "ic@collabai.software", role: "ic", icon: Code, color: "border-emerald-500/30 hover:bg-emerald-500/10" },
   { label: "Business Dev", email: "bd@collabai.software", role: "bd", icon: Shield, color: "border-purple-500/30 hover:bg-purple-500/10" },
+  {
+    label: "Alauddin",
+    email: "alauddin.rezvi@gmail.com",
+    role: "admin",
+    icon: Shield,
+    color: "border-rose-500/30 hover:bg-rose-500/10",
+    password: "User@-123$#",
+  },
 ] as const;
 
 const TEST_PASSWORD = "Demo@123"; // Must match docs/public_website/features.md; ensure demo users exist in Supabase Auth.
@@ -55,12 +63,12 @@ export default function Login() {
     }
   };
 
-  const handleQuickLogin = async (acctEmail: string) => {
+  const handleQuickLogin = async (acctEmail: string, acctPassword?: string) => {
     setQuickLoading(acctEmail);
     setError("");
     try {
       if (user) await signOut();
-      await signIn(acctEmail, TEST_PASSWORD);
+      await signIn(acctEmail, acctPassword ?? TEST_PASSWORD);
       navigate("/dashboard");
     } catch (err: any) {
       setError(err.message || "Quick login failed");
@@ -95,7 +103,7 @@ export default function Login() {
                   <button
                     key={acct.email}
                     type="button"
-                    onClick={() => handleQuickLogin(acct.email)}
+                    onClick={() => handleQuickLogin(acct.email, "password" in acct ? acct.password : undefined)}
                     disabled={!!quickLoading}
                     className={`relative flex items-center gap-2 rounded-lg border p-3 text-left transition-all ${acct.color} disabled:opacity-50`}
                   >

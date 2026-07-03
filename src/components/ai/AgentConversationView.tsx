@@ -146,7 +146,7 @@ export function AgentConversationView({
     setInput(starter);
   };
 
-  const isLoading = conversationLoading || messagesLoading || modelsLoading;
+  const isLoading = conversationLoading || messagesLoading;
   const hasMessages = messages && messages.length > 0;
   const loadError = conversationError || messagesError;
   const activeModel =

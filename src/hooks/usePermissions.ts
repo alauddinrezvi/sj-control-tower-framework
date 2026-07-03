@@ -2,6 +2,7 @@ import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { queryKeys } from "@/lib/cache";
+import { fetchUserPermissions } from "@/lib/permissions-fallback";
 
 export interface Permission {
   id: string;
@@ -18,15 +19,10 @@ export function usePermissions() {
 
   const query = useQuery({
     queryKey: queryKeys.admin.permissions,
-    queryFn: async () => {
-      const { data, error } = await supabase.rpc("get_user_permissions", {
-        _user_id: user!.id,
-      });
-      if (error) throw error;
-      return (data ?? []) as string[];
-    },
+    queryFn: async () => fetchUserPermissions(user!.id),
     enabled: !!user,
     staleTime: 1000 * 60 * 5,
+    retry: false,
     placeholderData: keepPreviousData,
   });
 

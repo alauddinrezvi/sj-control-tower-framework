@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
+import { isMissingTable } from "@/lib/supabase-errors";
 import { useMfaPolicy } from "@/hooks/useMfa";
 
 interface MfaEnrollmentSelf {
@@ -19,7 +20,12 @@ function useOwnMfaStatus() {
         .select("enrolled, grace_period_ends_at")
         .eq("user_id", user!.id)
         .maybeSingle();
-      if (error) throw error;
+      if (error) {
+        if (isMissingTable(error, "mfa_enrollment_status")) {
+          return { enrolled: false, grace_period_ends_at: null };
+        }
+        throw error;
+      }
       return (data as MfaEnrollmentSelf | null) ?? { enrolled: false, grace_period_ends_at: null };
     },
     enabled: !!user,

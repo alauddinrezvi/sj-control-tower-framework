@@ -3,6 +3,7 @@
  */
 
 import { supabase } from '@/integrations/supabase/client';
+import { isMissingTable } from '@/lib/supabase-errors';
 import type { Database } from '@/integrations/supabase/types';
 
 export type IntegrationSettingsRow =
@@ -96,27 +97,42 @@ async function fetchGlobalSettingsRow(): Promise<IntegrationSettingsRow | null> 
 }
 
 export async function getAIModelPolicy(): Promise<AIModelPolicy> {
-  const row = await fetchGlobalSettingsRow();
-  return normalizeAIModelPolicy(row?.ai_model_policy);
+  try {
+    const row = await fetchGlobalSettingsRow();
+    return normalizeAIModelPolicy(row?.ai_model_policy);
+  } catch (error) {
+    console.warn("AI model policy unavailable, using defaults:", error);
+    return { ...DEFAULT_AI_MODEL_POLICY };
+  }
 }
 
 export async function getConnectedAIIntegrationSlugs(): Promise<Set<string>> {
-  const { data: orgIntegrations, error: orgError } = await supabase
-    .from('organization_integrations')
-    .select('connection_status, enabled, provider:integration_providers(slug)')
-    .eq('connection_status', 'connected')
-    .eq('enabled', true);
+  try {
+    const { data: orgIntegrations, error: orgError } = await supabase
+      .from('organization_integrations')
+      .select('connection_status, enabled, provider:integration_providers(slug)')
+      .eq('connection_status', 'connected')
+      .eq('enabled', true);
 
-  if (orgError) throw orgError;
-
-  const connectedIntegrationSlugs = new Set<string>();
-  for (const row of orgIntegrations ?? []) {
-    const slug = (row.provider as { slug?: string } | null)?.slug;
-    if (slug && (AI_INTEGRATION_SLUGS as readonly string[]).includes(slug)) {
-      connectedIntegrationSlugs.add(slug);
+    if (orgError) {
+      if (isMissingTable(orgError, 'organization_integrations')) {
+        return new Set();
+      }
+      throw orgError;
     }
+
+    const connectedIntegrationSlugs = new Set<string>();
+    for (const row of orgIntegrations ?? []) {
+      const slug = (row.provider as { slug?: string } | null)?.slug;
+      if (slug && (AI_INTEGRATION_SLUGS as readonly string[]).includes(slug)) {
+        connectedIntegrationSlugs.add(slug);
+      }
+    }
+    return connectedIntegrationSlugs;
+  } catch (error) {
+    console.warn('Connected integrations unavailable:', error);
+    return new Set();
   }
-  return connectedIntegrationSlugs;
 }
 
 export async function getConnectedAIProviderIds(): Promise<Set<string>> {
@@ -136,33 +152,38 @@ export async function getConnectedAIProviderIds(): Promise<Set<string>> {
 }
 
 export async function fetchSelectableChatModels(): Promise<SelectableChatModel[]> {
-  const connectedProviderIds = await getConnectedAIProviderIds();
-  if (connectedProviderIds.size === 0) return [];
+  try {
+    const connectedProviderIds = await getConnectedAIProviderIds();
+    if (connectedProviderIds.size === 0) return [];
 
-  const { data, error } = await supabase
-    .from('ai_models')
-    .select('id, name, model_id, is_default, provider_id, ai_providers(name, slug)')
-    .eq('category', 'chat')
-    .eq('enabled', true)
-    .order('is_default', { ascending: false })
-    .order('name');
+    const { data, error } = await supabase
+      .from('ai_models')
+      .select('id, name, model_id, is_default, provider_id, ai_providers(name, slug)')
+      .eq('category', 'chat')
+      .eq('enabled', true)
+      .order('is_default', { ascending: false })
+      .order('name');
 
-  if (error) throw error;
+    if (error) throw error;
 
-  return (data ?? [])
-    .filter((m) => connectedProviderIds.has(m.provider_id))
-    .map((m) => {
-      const provider = m.ai_providers as { name: string; slug: string } | null;
-      return {
-        id: m.id,
-        name: m.name,
-        model_id: m.model_id,
-        is_default: m.is_default,
-        provider_id: m.provider_id,
-        provider_name: provider?.name ?? 'Unknown',
-        provider_slug: provider?.slug ?? '',
-      };
-    });
+    return (data ?? [])
+      .filter((m) => connectedProviderIds.has(m.provider_id))
+      .map((m) => {
+        const provider = m.ai_providers as { name: string; slug: string } | null;
+        return {
+          id: m.id,
+          name: m.name,
+          model_id: m.model_id,
+          is_default: m.is_default,
+          provider_id: m.provider_id,
+          provider_name: provider?.name ?? 'Unknown',
+          provider_slug: provider?.slug ?? '',
+        };
+      });
+  } catch (error) {
+    console.warn("Selectable chat models unavailable:", error);
+    return [];
+  }
 }
 
 export async function setGlobalDefaultChatModel(modelId: string): Promise<void> {

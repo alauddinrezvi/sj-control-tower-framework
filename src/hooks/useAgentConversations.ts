@@ -7,7 +7,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
 import { queryKeys } from "@/lib/cache";
 import { API } from "@/shared/config/api";
-import { isMissingTable } from "@/lib/supabase-errors";
+import { isMissingTable, getMissingColumnName } from "@/lib/supabase-errors";
 import { toast } from "sonner";
 
 const CONVERSATIONS_UNAVAILABLE =
@@ -79,28 +79,93 @@ export interface SendMessageData {
   memory_enabled?: boolean;
 }
 
+const AGENT_EMBED_SELECTS = [
+  "ai_agents(id, name, slug, avatar, description, welcome_message, conversation_starters, memory_enabled)",
+  "ai_agents(id, name, slug, description, memory_enabled)",
+  "ai_agents(id, name, slug, description)",
+] as const;
+
+const CONVERSATION_COLUMNS =
+  "id, agent_id, user_id, title, summary, is_archived, is_pinned, message_count, last_message_at, metadata, created_at, updated_at";
+
+async function fetchConversationsWithAgent(
+  buildQuery: (select: string) => Promise<{ data: unknown; error: unknown }>
+): Promise<AgentConversation[]> {
+  for (let i = 0; i < AGENT_EMBED_SELECTS.length; i += 1) {
+    const select = `${CONVERSATION_COLUMNS}, ${AGENT_EMBED_SELECTS[i]}`;
+    const { data, error } = await buildQuery(select);
+
+    if (!error) {
+      return (data ?? []) as AgentConversation[];
+    }
+
+    if (isConversationsSchemaMissing(error)) {
+      return [];
+    }
+
+    const missingColumn = getMissingColumnName(error);
+    if (missingColumn && i < AGENT_EMBED_SELECTS.length - 1) {
+      continue;
+    }
+
+    throw error;
+  }
+
+  return [];
+}
+
+async function fetchConversationWithAgent(
+  conversationId: string
+): Promise<AgentConversation | null> {
+  for (let i = 0; i < AGENT_EMBED_SELECTS.length; i += 1) {
+    const select = `${CONVERSATION_COLUMNS}, ${AGENT_EMBED_SELECTS[i]}`;
+    const { data, error } = await db
+      .from("agent_conversations")
+      .select(select)
+      .eq("id", conversationId)
+      .single();
+
+    if (!error) {
+      return data as AgentConversation;
+    }
+
+    const postgrestError = error as { code?: string };
+    if (postgrestError.code === "PGRST116") {
+      return null;
+    }
+
+    if (isConversationsSchemaMissing(error)) {
+      return null;
+    }
+
+    const missingColumn = getMissingColumnName(error);
+    if (missingColumn && i < AGENT_EMBED_SELECTS.length - 1) {
+      continue;
+    }
+
+    throw error;
+  }
+
+  return null;
+}
+
 export function useAgentConversations(agentId: string | undefined) {
   const { user } = useAuth();
   return useQuery({
     queryKey: queryKeys.ai.conversations(agentId ?? ""),
     queryFn: async (): Promise<AgentConversation[]> => {
       if (!agentId || !user?.id) return [];
-      const { data, error } = await db
-        .from("agent_conversations")
-        .select(
-          "id, agent_id, user_id, title, summary, is_archived, is_pinned, message_count, last_message_at, metadata, created_at, updated_at, ai_agents(id, name, slug, avatar, description, welcome_message, conversation_starters, memory_enabled)"
-        )
-        .eq("agent_id", agentId)
-        .eq("user_id", user.id)
-        .eq("is_archived", false)
-        .order("last_message_at", { ascending: false, nullsFirst: false })
-        .limit(50);
-
-      if (error) {
-        if (isConversationsSchemaMissing(error)) return [];
-        throw error;
-      }
-      return (data ?? []) as AgentConversation[];
+      return fetchConversationsWithAgent(async (select) => {
+        const result = await db
+          .from("agent_conversations")
+          .select(select)
+          .eq("agent_id", agentId)
+          .eq("user_id", user.id)
+          .eq("is_archived", false)
+          .order("last_message_at", { ascending: false, nullsFirst: false })
+          .limit(50);
+        return { data: result.data, error: result.error };
+      });
     },
     enabled: !!agentId && !!user?.id,
   });
@@ -111,20 +176,7 @@ export function useAgentConversation(conversationId: string | null) {
     queryKey: queryKeys.ai.conversation(conversationId ?? ""),
     queryFn: async (): Promise<AgentConversation | null> => {
       if (!conversationId) return null;
-      const { data, error } = await db
-        .from("agent_conversations")
-        .select(
-          "id, agent_id, user_id, title, summary, is_archived, is_pinned, message_count, last_message_at, metadata, created_at, updated_at, ai_agents(id, name, slug, avatar, description, welcome_message, conversation_starters, memory_enabled)"
-        )
-        .eq("id", conversationId)
-        .single();
-
-      if (error) {
-        if (error.code === "PGRST116") return null;
-        if (isConversationsSchemaMissing(error)) return null;
-        throw error;
-      }
-      return data as AgentConversation;
+      return fetchConversationWithAgent(conversationId);
     },
     enabled: !!conversationId,
   });
@@ -401,22 +453,17 @@ export function useArchivedConversations(agentId: string | undefined) {
     queryKey: [...queryKeys.ai.conversations(agentId ?? ""), "archived"],
     queryFn: async (): Promise<AgentConversation[]> => {
       if (!agentId || !user?.id) return [];
-      const { data, error } = await db
-        .from("agent_conversations")
-        .select(
-          "id, agent_id, user_id, title, summary, is_archived, is_pinned, message_count, last_message_at, metadata, created_at, updated_at, ai_agents(id, name, slug, avatar, description, memory_enabled)"
-        )
-        .eq("agent_id", agentId)
-        .eq("user_id", user.id)
-        .eq("is_archived", true)
-        .order("last_message_at", { ascending: false, nullsFirst: false })
-        .limit(50);
-
-      if (error) {
-        if (isConversationsSchemaMissing(error)) return [];
-        throw error;
-      }
-      return (data ?? []) as AgentConversation[];
+      return fetchConversationsWithAgent(async (select) => {
+        const result = await db
+          .from("agent_conversations")
+          .select(select)
+          .eq("agent_id", agentId)
+          .eq("user_id", user.id)
+          .eq("is_archived", true)
+          .order("last_message_at", { ascending: false, nullsFirst: false })
+          .limit(50);
+        return { data: result.data, error: result.error };
+      });
     },
     enabled: !!agentId && !!user?.id,
   });

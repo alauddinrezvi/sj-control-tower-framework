@@ -10,8 +10,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Brain, MessageSquare, Plus } from "lucide-react";
-import { useAuth } from "@/contexts/AuthContext";
+import { Brain, Loader2, MessageSquare, Plus } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { AgentConversationView } from "@/components/ai/AgentConversationView";
 import { AgentConversationList } from "@/components/ai/AgentConversationList";
@@ -30,18 +29,22 @@ interface AIAgent {
   memory_enabled: boolean;
 }
 
+const AGENT_SELECT =
+  "id, name, slug, description, is_enabled, memory_enabled";
+
 export default function AIChat() {
-  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
 
   const [agents, setAgents] = useState<AIAgent[]>([]);
   const [loadingAgents, setLoadingAgents] = useState(true);
+  const [urlAgent, setUrlAgent] = useState<AIAgent | null>(null);
+  const [loadingUrlAgent, setLoadingUrlAgent] = useState(false);
 
   const selectedAgentId = searchParams.get("agent") || "";
   const selectedConversationId = searchParams.get("conversation") || null;
 
   useEffect(() => {
-    fetchAgents();
+    void fetchAgents();
   }, []);
 
   useEffect(() => {
@@ -55,12 +58,50 @@ export default function AIChat() {
     }
   }, [agents, selectedAgentId, setSearchParams]);
 
-  const fetchAgents = async () => {
+  useEffect(() => {
+    if (!selectedAgentId) {
+      setUrlAgent(null);
+      return;
+    }
+
+    if (agents.some((agent) => agent.id === selectedAgentId)) {
+      setUrlAgent(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingUrlAgent(true);
+
+    void (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("ai_agents")
+          .select(AGENT_SELECT)
+          .eq("id", selectedAgentId)
+          .maybeSingle();
+
+        if (!cancelled && !error && data) {
+          setUrlAgent(data as AIAgent);
+        }
+      } catch (error: unknown) {
+        console.error("Fetch agent by id error:", error);
+      } finally {
+        if (!cancelled) {
+          setLoadingUrlAgent(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedAgentId, agents]);
+
+  const fetchAgents = async (): Promise<void> => {
     try {
       const { data, error } = await supabase
         .from("ai_agents")
-        .select("id, name, slug, description, is_enabled, memory_enabled")
-        .eq("is_enabled", true)
+        .select(AGENT_SELECT)
         .order("name");
 
       if (error) throw error;
@@ -76,7 +117,16 @@ export default function AIChat() {
     setSearchParams({ agent: agentId });
   };
 
-  const selectedAgent = agents.find((a) => a.id === selectedAgentId);
+  const selectedAgent =
+    agents.find((agent) => agent.id === selectedAgentId) ?? urlAgent;
+
+  const selectorAgents =
+    urlAgent && !agents.some((agent) => agent.id === urlAgent.id)
+      ? [...agents, urlAgent]
+      : agents;
+
+  const isResolvingAgent =
+    loadingAgents || (!!selectedAgentId && !selectedAgent && loadingUrlAgent);
 
   const { data: conversations } = useAgentConversations(selectedAgentId || undefined);
   const createConversation = useCreateConversation();
@@ -90,7 +140,7 @@ export default function AIChat() {
     }
   };
 
-  const handleNewConversation = async () => {
+  const handleNewConversation = async (): Promise<void> => {
     if (!selectedAgentId) return;
     try {
       const conversation = await createConversation.mutateAsync({
@@ -113,7 +163,6 @@ export default function AIChat() {
 
   return (
     <div className="h-[calc(100vh-120px)] flex flex-col">
-      {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight">AI Chat</h1>
@@ -121,16 +170,15 @@ export default function AIChat() {
             Chat with AI agents to get insights and assistance
           </p>
         </div>
-        {agents.length > 0 && (
+        {selectorAgents.length > 0 && (
           <Badge variant="outline" className="flex items-center gap-1">
             <Brain className="h-3 w-3" />
-            {agents.length} agents available
+            {selectorAgents.length} agents available
           </Badge>
         )}
       </div>
 
-      {/* Agent Selector */}
-      {agents.length > 0 && (
+      {selectorAgents.length > 0 && (
         <Card className="mb-4">
           <CardHeader className="pb-3">
             <CardTitle className="text-sm">Select AI Agent</CardTitle>
@@ -141,13 +189,18 @@ export default function AIChat() {
                 <SelectValue placeholder="Select an agent" />
               </SelectTrigger>
               <SelectContent>
-                {agents.map((agent) => (
+                {selectorAgents.map((agent) => (
                   <SelectItem key={agent.id} value={agent.id}>
                     <div className="flex items-center gap-2">
                       <span className="text-lg">🤖</span>
                       <div className="flex flex-col">
                         <div className="flex items-center gap-2">
                           <span>{agent.name}</span>
+                          {!agent.is_enabled && (
+                            <Badge variant="outline" className="text-[9px] px-1 py-0">
+                              disabled
+                            </Badge>
+                          )}
                           {agent.memory_enabled && (
                             <Badge variant="secondary" className="text-xs px-1.5 py-0 h-4 flex items-center gap-1">
                               <Brain className="h-2.5 w-2.5" />
@@ -170,8 +223,7 @@ export default function AIChat() {
         </Card>
       )}
 
-      {/* Chat area: only when an agent is selected */}
-      {!selectedAgentId && agents.length > 0 && (
+      {!selectedAgentId && selectorAgents.length > 0 && (
         <Card className="flex-1 flex items-center justify-center">
           <div className="text-center p-8 text-muted-foreground">
             <MessageSquare className="h-12 w-12 mx-auto mb-3 opacity-50" />
@@ -180,17 +232,17 @@ export default function AIChat() {
         </Card>
       )}
 
-      {!selectedAgentId && loadingAgents && (
+      {isResolvingAgent && (
         <Card className="flex-1 flex items-center justify-center">
-          <div className="text-center p-8 text-muted-foreground">
-            Loading agents…
+          <div className="text-center p-8 text-muted-foreground flex flex-col items-center gap-3">
+            <Loader2 className="h-8 w-8 animate-spin text-primary" />
+            <p>Loading agent…</p>
           </div>
         </Card>
       )}
 
-      {selectedAgentId && selectedAgent && (
+      {!isResolvingAgent && selectedAgentId && selectedAgent && (
         <div className="flex-1 flex gap-4 min-h-0">
-          {/* Conversation list sidebar */}
           <div className="w-64 flex-shrink-0 hidden sm:block">
             <AgentConversationList
               agentId={selectedAgentId}
@@ -201,7 +253,6 @@ export default function AIChat() {
             />
           </div>
 
-          {/* Main chat area */}
           <Card className="flex-1 flex flex-col min-h-0 overflow-hidden">
             {selectedConversationId ? (
               <AgentConversationView
@@ -231,18 +282,18 @@ export default function AIChat() {
         </div>
       )}
 
-      {selectedAgentId && !selectedAgent && agents.length > 0 && (
+      {!isResolvingAgent && selectedAgentId && !selectedAgent && (
         <Card className="flex-1 flex items-center justify-center">
           <div className="text-center p-8 text-muted-foreground">
-            Selected agent not found. Choose another from the list above.
+            Agent not found. It may have been deleted — choose another from the list above.
           </div>
         </Card>
       )}
 
-      {agents.length === 0 && !loadingAgents && (
+      {!isResolvingAgent && selectorAgents.length === 0 && !loadingAgents && (
         <Card className="flex-1 flex items-center justify-center">
           <div className="text-center p-8 text-muted-foreground">
-            No AI agents are available. Contact your administrator to enable agents.
+            No AI agents are available. Create or enable an agent in Admin → AI Agents.
           </div>
         </Card>
       )}

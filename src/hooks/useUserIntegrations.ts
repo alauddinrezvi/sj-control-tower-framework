@@ -7,6 +7,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '@/integrations/supabase/client';
 import { useAuth } from '@/contexts/AuthContext';
+import { isMissingTable } from '@/lib/supabase-errors';
 import { toast } from 'sonner';
 
 export interface UserOAuthToken {
@@ -138,7 +139,12 @@ export function useAvailableUserProviders() {
         `)
         .eq('connection_status', 'connected');
 
-      if (error) throw error;
+      if (error) {
+        if (isMissingTable(error, 'organization_integrations')) {
+          return [];
+        }
+        throw error;
+      }
 
       interface OrgIntegrationRow {
         enabled?: boolean | null;

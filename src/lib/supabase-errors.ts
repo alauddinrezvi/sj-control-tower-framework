@@ -12,6 +12,15 @@ export function isMissingTable(error: unknown, tableName: string): boolean {
   );
 }
 
+export function isMissingRpc(error: unknown, functionName: string): boolean {
+  if (!error || typeof error !== "object") return false;
+  const postgrestError = error as PostgrestErrorLike;
+  return (
+    postgrestError.code === "PGRST202" &&
+    (postgrestError.message?.includes(functionName) ?? false)
+  );
+}
+
 export function getMissingColumnName(error: unknown): string | null {
   if (!error || typeof error !== "object") return null;
   const postgrestError = error as PostgrestErrorLike;

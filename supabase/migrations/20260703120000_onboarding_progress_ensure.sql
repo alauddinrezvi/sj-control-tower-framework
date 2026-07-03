@@ -29,8 +29,18 @@ CREATE POLICY "Admins can view all onboarding progress"
   ON public.onboarding_progress FOR SELECT TO authenticated
   USING (public.has_role(auth.uid(), 'admin'));
 
--- Allow users to add themselves to a department during onboarding
-DROP POLICY IF EXISTS "Users can join departments for themselves" ON public.department_users;
-CREATE POLICY "Users can join departments for themselves"
-  ON public.department_users FOR INSERT TO authenticated
-  WITH CHECK (auth.uid() = user_id);
+-- Allow users to add themselves to a department during onboarding (only if table exists)
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+      AND table_name = 'department_users'
+  ) THEN
+    DROP POLICY IF EXISTS "Users can join departments for themselves" ON public.department_users;
+    CREATE POLICY "Users can join departments for themselves"
+      ON public.department_users FOR INSERT TO authenticated
+      WITH CHECK (auth.uid() = user_id);
+  END IF;
+END $$;
